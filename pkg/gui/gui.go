@@ -37,6 +37,11 @@ type Gui struct {
 	ErrorChan     chan error
 	Views         Views
 
+	// stores machine-local state like the adjusted side panel widths; nil if
+	// the database could not be opened, in which case we degrade to a
+	// session-only experience
+	machineState *config.MachineStateDB
+
 	// if we've suspended the gui (e.g. because we've switched to a subprocess)
 	// we typically want to pause some things that are running like background
 	// file refreshes
@@ -121,6 +126,36 @@ const (
 	SCREEN_FULL
 )
 
+// openMachineStateWithSidePanelWidths opens the machine state database and
+// returns it along with the side panel widths to start the session with: the
+// widths persisted from a previous session if present, otherwise the
+// configured ones. Failing to open the database is not fatal: we just fall
+// back to the configured widths and don't persist adjustments this session.
+func openMachineStateWithSidePanelWidths(log *logrus.Entry, userConfig *config.UserConfig) (*config.MachineStateDB, float64, float64) {
+	sidePanelWidth := userConfig.Gui.SidePanelWidth
+	halfScreenModeSidePanelWidth := userConfig.Gui.HalfScreenModeSidePanelWidth
+
+	machineState, err := config.OpenMachineStateDB()
+	if err != nil {
+		log.Warnf("could not open machine state database, side panel width adjustments will not persist: %v", err)
+		return nil, sidePanelWidth, halfScreenModeSidePanelWidth
+	}
+
+	if value, ok, err := machineState.GetFloat(config.MachineStateKeySidePanelWidth); err != nil {
+		log.Warnf("could not read side panel width from machine state: %v", err)
+	} else if ok && value > 0 && value < 1 {
+		sidePanelWidth = value
+	}
+
+	if value, ok, err := machineState.GetFloat(config.MachineStateKeyHalfScreenModeSidePanelWidth); err != nil {
+		log.Warnf("could not read half screen mode side panel width from machine state: %v", err)
+	} else if ok && value > 0 && value < 1 {
+		halfScreenModeSidePanelWidth = value
+	}
+
+	return machineState, sidePanelWidth, halfScreenModeSidePanelWidth
+}
+
 func getScreenMode(config *config.AppConfig) WindowMaximisation {
 	switch config.UserConfig.Gui.ScreenMode {
 	case "normal":
@@ -136,6 +171,11 @@ func getScreenMode(config *config.AppConfig) WindowMaximisation {
 
 // NewGui builds a new gui handler
 func NewGui(log *logrus.Entry, dockerCommand *commands.DockerCommand, oSCommand *commands.OSCommand, tr *i18n.TranslationSet, config *config.AppConfig, errorChan chan error) (*Gui, error) {
+	sidePanelWidth := config.UserConfig.Gui.SidePanelWidth
+	halfScreenModeSidePanelWidth := config.UserConfig.Gui.HalfScreenModeSidePanelWidth
+
+	machineState, sidePanelWidth, halfScreenModeSidePanelWidth := openMachineStateWithSidePanelWidths(log, config.UserConfig)
+
 	initialState := guiState{
 		Platform: *oSCommand.Platform,
 		Panels: &panelStates{
@@ -147,9 +187,9 @@ func NewGui(log *logrus.Entry, dockerCommand *commands.DockerCommand, oSCommand 
 
 		ShowExitedContainers: true,
 		ScreenMode:           getScreenMode(config),
-		SidePanelWidth:       config.UserConfig.Gui.SidePanelWidth,
+		SidePanelWidth:       sidePanelWidth,
 
-		HalfScreenModeSidePanelWidth: config.UserConfig.Gui.HalfScreenModeSidePanelWidth,
+		HalfScreenModeSidePanelWidth: halfScreenModeSidePanelWidth,
 	}
 
 	gui := &Gui{
@@ -162,6 +202,7 @@ func NewGui(log *logrus.Entry, dockerCommand *commands.DockerCommand, oSCommand 
 		statusManager: &statusManager{},
 		taskManager:   tasks.NewTaskManager(log, tr),
 		ErrorChan:     errorChan,
+		machineState:  machineState,
 	}
 
 	deadlock.Opts.Disable = !gui.Config.Debug
@@ -197,6 +238,10 @@ func (gui *Gui) goEvery(interval time.Duration, function func() error) {
 func (gui *Gui) Run() error {
 	// closing our task manager which in turn closes the current task if there is any, so we aren't leaving processes lying around after closing lazydocker
 	defer gui.taskManager.Close()
+
+	// flush the machine state database to disk; deferred so that every quit
+	// path goes through it
+	defer gui.closeMachineState()
 
 	g, err := gocui.NewGui(gocui.NewGuiOpts{
 		OutputMode:       gocui.OutputTrue,

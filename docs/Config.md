@@ -52,6 +52,10 @@ gui:
   # mode. Adjustable at runtime with <alt+shift+left>/<alt+shift+right> while
   # in half screen mode.
   halfScreenModeSidePanelWidth: 0.5
+  # Note: adjustments made with <alt+shift+left>/<alt+shift+right> are
+  # remembered per machine (stored in a sqlite database in your temp folder)
+  # and take precedence over the widths configured here until you reset them
+  # with <alt+shift+=>.
   # Determines whether we show the bottom line (the one containing keybinding
   # info and the status of the app).
   showBottomLine: true

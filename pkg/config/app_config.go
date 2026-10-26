@@ -127,7 +127,8 @@ type GuiConfig struct {
 	// half screen mode, where the side panels and the main panel share the
 	// screen. Defaults to 0.5 i.e. an even split. Adjustable at runtime with
 	// <alt+shift+left>/<alt+shift+right> while in half screen mode; the
-	// adjustment lasts for the current session unless you change it here.
+	// adjustment is remembered for this machine (in the temp folder) until
+	// you press <alt+shift+=> to go back to the configured width.
 	HalfScreenModeSidePanelWidth float64 `yaml:"halfScreenModeSidePanelWidth,omitempty"`
 
 	// Determines whether we show the bottom line (the one containing keybinding

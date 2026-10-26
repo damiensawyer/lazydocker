@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jesseduffield/gocui"
+	"github.com/jesseduffield/lazydocker/pkg/config"
 	"github.com/jesseduffield/lazydocker/pkg/gui/panels"
 	"github.com/jesseduffield/lazydocker/pkg/utils"
 	"github.com/samber/lo"
@@ -354,8 +355,10 @@ func (gui *Gui) adjustSidePanelWidth(delta float64) error {
 
 	if gui.State.ScreenMode == SCREEN_HALF {
 		gui.State.HalfScreenModeSidePanelWidth = width
+		gui.persistSidePanelWidth(config.MachineStateKeyHalfScreenModeSidePanelWidth, width)
 	} else {
 		gui.State.SidePanelWidth = width
+		gui.persistSidePanelWidth(config.MachineStateKeySidePanelWidth, width)
 	}
 
 	gui.showToast(utils.ResolvePlaceholderString(
@@ -373,13 +376,50 @@ func (gui *Gui) resetSidePanelWidth() error {
 
 	if gui.State.ScreenMode == SCREEN_HALF {
 		gui.State.HalfScreenModeSidePanelWidth = gui.Config.UserConfig.Gui.HalfScreenModeSidePanelWidth
+		gui.clearPersistedSidePanelWidth(config.MachineStateKeyHalfScreenModeSidePanelWidth)
 	} else {
 		gui.State.SidePanelWidth = gui.Config.UserConfig.Gui.SidePanelWidth
+		gui.clearPersistedSidePanelWidth(config.MachineStateKeySidePanelWidth)
 	}
 
 	gui.showToast(gui.Tr.SidePanelWidthReset)
 
 	return nil
+}
+
+// persistSidePanelWidth saves the adjusted width machine-locally so that it
+// survives restarting lazydocker
+func (gui *Gui) persistSidePanelWidth(key string, width float64) {
+	if gui.machineState == nil {
+		return
+	}
+
+	if err := gui.machineState.SetFloat(key, width); err != nil {
+		gui.Log.Warnf("could not save %s to machine state: %v", key, err)
+	}
+}
+
+// clearPersistedSidePanelWidth removes the machine-local width override, so
+// that the configured width applies again
+func (gui *Gui) clearPersistedSidePanelWidth(key string) {
+	if gui.machineState == nil {
+		return
+	}
+
+	if err := gui.machineState.Delete(key); err != nil {
+		gui.Log.Warnf("could not remove %s from machine state: %v", key, err)
+	}
+}
+
+// closeMachineState closes the machine state database, if we have one
+func (gui *Gui) closeMachineState() {
+	if gui.machineState == nil {
+		return
+	}
+
+	if err := gui.machineState.Close(); err != nil {
+		gui.Log.Warnf("could not close machine state database: %v", err)
+	}
 }
 
 // showToast shows a transient message in the app status section of the bottom
