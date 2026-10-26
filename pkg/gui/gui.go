@@ -84,6 +84,16 @@ type guiState struct {
 
 	ScreenMode WindowMaximisation
 
+	// The width of the side panels as a ratio of the screen's width in normal
+	// screen mode. Adjusted at runtime with <alt+shift+left>/<alt+shift+right>;
+	// starts out at the configured Gui.SidePanelWidth.
+	SidePanelWidth float64
+
+	// The width of the side panels as a ratio of the screen's width in half
+	// screen mode. Adjusted at runtime with <alt+shift+left>/<alt+shift+right>;
+	// starts out at the configured Gui.HalfScreenModeSidePanelWidth.
+	HalfScreenModeSidePanelWidth float64
+
 	// Maintains the state of manual filtering i.e. typing in a substring
 	// to filter on in the current panel.
 	Filter filterState
@@ -137,6 +147,9 @@ func NewGui(log *logrus.Entry, dockerCommand *commands.DockerCommand, oSCommand 
 
 		ShowExitedContainers: true,
 		ScreenMode:           getScreenMode(config),
+		SidePanelWidth:       config.UserConfig.Gui.SidePanelWidth,
+
+		HalfScreenModeSidePanelWidth: config.UserConfig.Gui.HalfScreenModeSidePanelWidth,
 	}
 
 	gui := &Gui{

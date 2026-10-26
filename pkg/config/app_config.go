@@ -123,6 +123,13 @@ type GuiConfig struct {
 	// If 0.333, then the side panels will be 1/3 of the screen's width
 	SidePanelWidth float64 `yaml:"sidePanelWidth"`
 
+	// The width of the side panels as a ratio of the screen's width when in
+	// half screen mode, where the side panels and the main panel share the
+	// screen. Defaults to 0.5 i.e. an even split. Adjustable at runtime with
+	// <alt+shift+left>/<alt+shift+right> while in half screen mode; the
+	// adjustment lasts for the current session unless you change it here.
+	HalfScreenModeSidePanelWidth float64 `yaml:"halfScreenModeSidePanelWidth,omitempty"`
+
 	// Determines whether we show the bottom line (the one containing keybinding
 	// info and the status of the app).
 	ShowBottomLine bool `yaml:"showBottomLine"`
@@ -368,15 +375,16 @@ func GetDefaultConfig() UserConfig {
 				SelectedLineBgColor: []string{"blue"},
 				OptionsTextColor:    []string{"blue"},
 			},
-			ShowAllContainers:          false,
-			ReturnImmediately:          false,
-			WrapMainPanel:              true,
-			LegacySortContainers:       false,
-			SidePanelWidth:             0.3333,
-			ShowBottomLine:             true,
-			ExpandFocusedSidePanel:     false,
-			ScreenMode:                 "normal",
-			ContainerStatusHealthStyle: "long",
+			ShowAllContainers:            false,
+			ReturnImmediately:            false,
+			WrapMainPanel:                true,
+			LegacySortContainers:         false,
+			SidePanelWidth:               0.3333,
+			HalfScreenModeSidePanelWidth: 0.5,
+			ShowBottomLine:               true,
+			ExpandFocusedSidePanel:       false,
+			ScreenMode:                   "normal",
+			ContainerStatusHealthStyle:   "long",
 		},
 		ConfirmOnQuit: false,
 		Logs: LogsConfig{

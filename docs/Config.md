@@ -48,6 +48,10 @@ gui:
   wrapMainPanel: true
   # Side panel width as a ratio of the screen's width
   sidePanelWidth: 0.333
+  # Side panel width as a ratio of the screen's width when in half screen
+  # mode. Adjustable at runtime with <alt+shift+left>/<alt+shift+right> while
+  # in half screen mode.
+  halfScreenModeSidePanelWidth: 0.5
   # Determines whether we show the bottom line (the one containing keybinding
   # info and the status of the app).
   showBottomLine: true

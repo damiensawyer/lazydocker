@@ -37,6 +37,16 @@ func (m *statusManager) addWaitingStatus(name string) {
 	m.statuses = append([]appStatus{newStatus}, m.statuses...)
 }
 
+func (m *statusManager) addToast(name string) {
+	m.removeStatus(name)
+	newStatus := appStatus{
+		name:       name,
+		statusType: "toast",
+		duration:   0,
+	}
+	m.statuses = append([]appStatus{newStatus}, m.statuses...)
+}
+
 func (m *statusManager) getStatusString() string {
 	if len(m.statuses) == 0 {
 		return ""

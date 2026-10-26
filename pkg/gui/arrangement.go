@@ -1,6 +1,8 @@
 package gui
 
 import (
+	"math"
+
 	"github.com/jesseduffield/lazycore/pkg/boxlayout"
 	"github.com/jesseduffield/lazydocker/pkg/gui/panels"
 	"github.com/jesseduffield/lazydocker/pkg/utils"
@@ -65,21 +67,32 @@ func (gui *Gui) getWindowDimensions(informationStr string, appStatus string) map
 }
 
 func (gui *Gui) getMidSectionWeights() (int, int) {
-	currentWindow := gui.currentStaticWindowName()
+	return getMidSectionWeights(
+		gui.State.SidePanelWidth,
+		gui.State.HalfScreenModeSidePanelWidth,
+		gui.currentStaticWindowName(),
+		gui.State.ScreenMode,
+	)
+}
 
-	// we originally specified this as a ratio i.e. .20 would correspond to a weight of 1 against 4
-	sidePanelWidthRatio := gui.Config.UserConfig.Gui.SidePanelWidth
-	// we could make this better by creating ratios like 2:3 rather than always 1:something
-	mainSectionWeight := int(1/sidePanelWidthRatio) - 1
-	sideSectionWeight := 1
+func getMidSectionWeights(sidePanelWidthRatio float64, halfScreenModeSidePanelWidthRatio float64, currentWindow string, screenMode WindowMaximisation) (int, int) {
+	// we originally specified this as a ratio i.e. .20 would correspond to a weight of 1 against 4.
+	// Using 120 so that the default of 0.3333 keeps the 1:2 split that the
+	// old weight-based formula produced
+	const maxColumnCount = 120
 
-	if currentWindow == "main" && gui.State.ScreenMode == SCREEN_FULL {
+	mainSectionWeight := int(math.Round(maxColumnCount * (1 - sidePanelWidthRatio)))
+	sideSectionWeight := int(math.Round(maxColumnCount * sidePanelWidthRatio))
+
+	if currentWindow == "main" && screenMode == SCREEN_FULL {
 		mainSectionWeight = 1
 		sideSectionWeight = 0
 	} else {
-		if gui.State.ScreenMode == SCREEN_HALF {
-			mainSectionWeight = 1
-		} else if gui.State.ScreenMode == SCREEN_FULL {
+		if screenMode == SCREEN_HALF {
+			// in half screen mode the split is governed by its own width ratio
+			mainSectionWeight = int(math.Round(maxColumnCount * (1 - halfScreenModeSidePanelWidthRatio)))
+			sideSectionWeight = int(math.Round(maxColumnCount * halfScreenModeSidePanelWidthRatio))
+		} else if screenMode == SCREEN_FULL {
 			mainSectionWeight = 0
 		}
 	}

@@ -126,9 +126,14 @@ type TranslationSet struct {
 	No  string
 	Yes string
 
-	LcNextScreenMode string
-	LcPrevScreenMode string
-	FilterPrompt     string
+	LcNextScreenMode         string
+	LcPrevScreenMode         string
+	LcDecreaseSidePanelWidth string
+	LcIncreaseSidePanelWidth string
+	LcResetSidePanelWidth    string
+	SidePanelWidthChanged    string
+	SidePanelWidthReset      string
+	FilterPrompt             string
 
 	FocusProjects   string
 	FocusServices   string
@@ -269,9 +274,14 @@ func englishSet() TranslationSet {
 		No:  "no",
 		Yes: "yes",
 
-		LcNextScreenMode: "next screen mode (normal/half/fullscreen)",
-		LcPrevScreenMode: "prev screen mode",
-		FilterPrompt:     "filter",
+		LcNextScreenMode:         "next screen mode (normal/half/fullscreen)",
+		LcPrevScreenMode:         "prev screen mode",
+		LcDecreaseSidePanelWidth: "decrease side panel width",
+		LcIncreaseSidePanelWidth: "increase side panel width",
+		LcResetSidePanelWidth:    "reset side panel width",
+		SidePanelWidthChanged:    "side panel width: {{width}}",
+		SidePanelWidthReset:      "side panel width reset",
+		FilterPrompt:             "filter",
 
 		FocusProjects:   "focus projects panel",
 		FocusServices:   "focus services panel",

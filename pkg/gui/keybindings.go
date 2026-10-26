@@ -3,6 +3,7 @@ package gui
 import (
 	"fmt"
 
+	"github.com/gdamore/tcell/v2"
 	"github.com/jesseduffield/gocui"
 )
 
@@ -17,7 +18,14 @@ type Binding struct {
 	Description string
 }
 
-// GetKey is a function.
+// altShiftModifier matches keypresses where alt and shift are both held.
+// gocui does not export a shift modifier so we build the combination from
+// tcell ourselves; the tcell driver passes alt+shift keypresses through with
+// exactly this modifier set.
+var altShiftModifier = gocui.ModAlt | gocui.Modifier(tcell.ModShift)
+
+// GetKey returns a human readable representation of the binding's key,
+// including any modifier e.g. 'alt+shift+►'
 func (b *Binding) GetKey() string {
 	key := 0
 
@@ -28,29 +36,37 @@ func (b *Binding) GetKey() string {
 		key = int(b.Key.(gocui.Key))
 	}
 
+	prefix := ""
+	if b.Modifier&gocui.ModAlt != 0 {
+		prefix += "alt+"
+	}
+	if b.Modifier&gocui.Modifier(tcell.ModShift) != gocui.ModNone {
+		prefix += "shift+"
+	}
+
 	// special keys
 	switch key {
 	case 27:
-		return "esc"
+		return prefix + "esc"
 	case 13:
-		return "enter"
+		return prefix + "enter"
 	case 32:
-		return "space"
-	case 65514:
-		return "►"
-	case 65515:
-		return "◄"
-	case 65517:
-		return "▲"
-	case 65516:
-		return "▼"
-	case 65508:
-		return "PgUp"
-	case 65507:
-		return "PgDn"
+		return prefix + "space"
+	case int(gocui.KeyArrowRight):
+		return prefix + "►"
+	case int(gocui.KeyArrowLeft):
+		return prefix + "◄"
+	case int(gocui.KeyArrowUp):
+		return prefix + "▲"
+	case int(gocui.KeyArrowDown):
+		return prefix + "▼"
+	case int(gocui.KeyPgup):
+		return prefix + "PgUp"
+	case int(gocui.KeyPgdn):
+		return prefix + "PgDn"
 	}
 
-	return fmt.Sprintf("%c", key)
+	return prefix + fmt.Sprintf("%c", key)
 }
 
 // GetInitialKeybindings is a function.
@@ -508,6 +524,43 @@ func (gui *Gui) GetInitialKeybindings() []*Binding {
 			Key:         '_',
 			Handler:     wrappedHandler(gui.prevScreenMode),
 			Description: gui.Tr.LcPrevScreenMode,
+		},
+		{
+			ViewName:    "",
+			Key:         gocui.KeyArrowLeft,
+			Modifier:    altShiftModifier,
+			Handler:     wrappedHandler(gui.decreaseSidePanelWidth),
+			Description: gui.Tr.LcDecreaseSidePanelWidth,
+		},
+		{
+			ViewName:    "",
+			Key:         gocui.KeyArrowRight,
+			Modifier:    altShiftModifier,
+			Handler:     wrappedHandler(gui.increaseSidePanelWidth),
+			Description: gui.Tr.LcIncreaseSidePanelWidth,
+		},
+		{
+			ViewName:    "",
+			Key:         '=',
+			Modifier:    altShiftModifier,
+			Handler:     wrappedHandler(gui.resetSidePanelWidth),
+			Description: gui.Tr.LcResetSidePanelWidth,
+		},
+		// terminals that don't support extended key reporting differ in how
+		// they encode alt+shift+=: some fold the shift into the shifted rune
+		// (alt+'+'), some drop it entirely (alt+'=', as tmux does). Kept
+		// descriptionless so the options menu doesn't list them all.
+		{
+			ViewName: "",
+			Key:      '+',
+			Modifier: gocui.ModAlt,
+			Handler:  wrappedHandler(gui.resetSidePanelWidth),
+		},
+		{
+			ViewName: "",
+			Key:      '=',
+			Modifier: gocui.ModAlt,
+			Handler:  wrappedHandler(gui.resetSidePanelWidth),
 		},
 	}
 

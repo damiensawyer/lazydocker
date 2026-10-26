@@ -2,8 +2,11 @@ package gui
 
 import (
 	"fmt"
+	"math"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jesseduffield/gocui"
 	"github.com/jesseduffield/lazydocker/pkg/gui/panels"
@@ -307,6 +310,93 @@ func (gui *Gui) prevScreenMode() error {
 	gui.State.ScreenMode = prevIntInCycle([]WindowMaximisation{SCREEN_NORMAL, SCREEN_HALF, SCREEN_FULL}, gui.State.ScreenMode)
 
 	return nil
+}
+
+const (
+	// the bounds the side panel width adjustments are clamped to
+	minSidePanelWidth = 0.1
+	maxSidePanelWidth = 0.9
+	// how much each adjustment of the side panel width changes the width by
+	sidePanelWidthDelta = 0.05
+	// how long a toast message stays on screen
+	toastDuration = 2 * time.Second
+)
+
+func (gui *Gui) decreaseSidePanelWidth() error {
+	return gui.adjustSidePanelWidth(-sidePanelWidthDelta)
+}
+
+func (gui *Gui) increaseSidePanelWidth() error {
+	return gui.adjustSidePanelWidth(sidePanelWidthDelta)
+}
+
+func (gui *Gui) adjustSidePanelWidth(delta float64) error {
+	if gui.State.ScreenMode == SCREEN_FULL {
+		// the focused panel takes up the whole screen so there's no width to adjust
+		return nil
+	}
+
+	current := gui.State.SidePanelWidth
+	if gui.State.ScreenMode == SCREEN_HALF {
+		current = gui.State.HalfScreenModeSidePanelWidth
+	}
+
+	// Round away the floating point error of adding the delta, which would
+	// otherwise accumulate with every step. Four decimals keep the default
+	// width of 0.3333 intact.
+	width := math.Round((current+delta)*10000) / 10000
+	if width < minSidePanelWidth {
+		width = minSidePanelWidth
+	}
+	if width > maxSidePanelWidth {
+		width = maxSidePanelWidth
+	}
+
+	if gui.State.ScreenMode == SCREEN_HALF {
+		gui.State.HalfScreenModeSidePanelWidth = width
+	} else {
+		gui.State.SidePanelWidth = width
+	}
+
+	gui.showToast(utils.ResolvePlaceholderString(
+		gui.Tr.SidePanelWidthChanged,
+		map[string]string{"width": strconv.FormatFloat(width, 'f', 2, 64)},
+	))
+
+	return nil
+}
+
+func (gui *Gui) resetSidePanelWidth() error {
+	if gui.State.ScreenMode == SCREEN_FULL {
+		return nil
+	}
+
+	if gui.State.ScreenMode == SCREEN_HALF {
+		gui.State.HalfScreenModeSidePanelWidth = gui.Config.UserConfig.Gui.HalfScreenModeSidePanelWidth
+	} else {
+		gui.State.SidePanelWidth = gui.Config.UserConfig.Gui.SidePanelWidth
+	}
+
+	gui.showToast(gui.Tr.SidePanelWidthReset)
+
+	return nil
+}
+
+// showToast shows a transient message in the app status section of the bottom
+// line, taking it away again after toastDuration
+func (gui *Gui) showToast(message string) {
+	gui.statusManager.addToast(message)
+	if err := gui.renderString(gui.g, "appStatus", message); err != nil {
+		gui.Log.Warn(err)
+	}
+
+	go func() {
+		time.Sleep(toastDuration)
+		gui.statusManager.removeStatus(message)
+		if err := gui.renderString(gui.g, "appStatus", gui.statusManager.getStatusString()); err != nil {
+			gui.Log.Warn(err)
+		}
+	}()
 }
 
 func nextIntInCycle(sl []WindowMaximisation, current WindowMaximisation) WindowMaximisation {
