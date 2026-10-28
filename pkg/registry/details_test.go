@@ -556,6 +556,250 @@ func TestTagsSharingDigest(t *testing.T) {
 	if _, err := c.TagsSharingDigest(ctx, "app/shared", "not-a-digest"); err == nil {
 		t.Error("expected error for invalid digest")
 	}
+
+	t.Run("omits Docker-Content-Digest on HEAD falls back to GET", func(t *testing.T) {
+		s := registrytest.New(registrytest.Config{
+			OmitDigestOnHead: true,
+			Repositories: []registrytest.Repository{
+				{
+					Name: "app/omit-head",
+					Tags: map[string]registrytest.Manifest{
+						"1.0":    {MediaType: fxA.manifest.mediaType, Body: fxA.manifest.body},
+						"latest": {MediaType: fxA.manifest.mediaType, Body: fxA.manifest.body},
+						"2.0":    {MediaType: fxB.manifest.mediaType, Body: fxB.manifest.body},
+					},
+				},
+			},
+		})
+		defer s.Close()
+
+		c, err := NewClient(s.Host(), Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := c.TagsSharingDigest(catalogCtx(t), "app/omit-head", fxA.manifest.dgst)
+		if err != nil {
+			t.Fatalf("TagsSharingDigest: %v", err)
+		}
+		want := []string{"1.0", "latest"}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("TagsSharingDigest = %v, want %v", got, want)
+		}
+
+		// Verify both HEAD and GET were made, and GET carried acceptManifests.
+		var heads, gets int
+		for _, r := range s.Requests() {
+			if strings.HasPrefix(r.Path, "/v2/app/omit-head/manifests/") {
+				if r.Method == http.MethodHead {
+					heads++
+				}
+				if r.Method == http.MethodGet {
+					gets++
+					if r.Accept != acceptManifests {
+						t.Errorf("GET Accept = %q, want %q", r.Accept, acceptManifests)
+					}
+				}
+			}
+		}
+		if heads != 3 || gets != 3 {
+			t.Errorf("expected 3 HEAD and 3 GET requests, got heads=%d gets=%d", heads, gets)
+		}
+	})
+
+	t.Run("HEAD 405 Method Not Allowed falls back to GET", func(t *testing.T) {
+		s := registrytest.New(registrytest.Config{
+			ManifestHead405: true,
+			Repositories: []registrytest.Repository{
+				{
+					Name: "app/head-405",
+					Tags: map[string]registrytest.Manifest{
+						"1.0":    {MediaType: fxA.manifest.mediaType, Body: fxA.manifest.body},
+						"latest": {MediaType: fxA.manifest.mediaType, Body: fxA.manifest.body},
+						"2.0":    {MediaType: fxB.manifest.mediaType, Body: fxB.manifest.body},
+					},
+				},
+			},
+		})
+		defer s.Close()
+
+		c, err := NewClient(s.Host(), Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := c.TagsSharingDigest(catalogCtx(t), "app/head-405", fxA.manifest.dgst)
+		if err != nil {
+			t.Fatalf("TagsSharingDigest: %v", err)
+		}
+		want := []string{"1.0", "latest"}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("TagsSharingDigest = %v, want %v", got, want)
+		}
+
+		var heads, gets int
+		for _, r := range s.Requests() {
+			if strings.HasPrefix(r.Path, "/v2/app/head-405/manifests/") {
+				if r.Method == http.MethodHead {
+					heads++
+				}
+				if r.Method == http.MethodGet {
+					gets++
+					if r.Accept != acceptManifests {
+						t.Errorf("GET Accept = %q, want %q", r.Accept, acceptManifests)
+					}
+				}
+			}
+		}
+		if heads != 3 || gets != 3 {
+			t.Errorf("expected 3 HEAD and 3 GET requests, got heads=%d gets=%d", heads, gets)
+		}
+	})
+
+	t.Run("tag 404 between list and probe is safely skipped", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.URL.Path == "/v2/app/race/tags/list":
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"name":"app/race","tags":["1.0","deleted"]}`))
+			case r.URL.Path == "/v2/app/race/manifests/1.0":
+				w.Header().Set("Content-Type", fxA.manifest.mediaType)
+				w.Header().Set("Docker-Content-Digest", fxA.manifest.dgst.String())
+				if r.Method == http.MethodGet {
+					_, _ = w.Write(fxA.manifest.body)
+				}
+			case r.URL.Path == "/v2/app/race/manifests/deleted":
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = w.Write([]byte(`{"errors":[{"code":"MANIFEST_UNKNOWN"}]}`))
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer srv.Close()
+
+		c, err := NewClient(srv.URL, Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := c.TagsSharingDigest(catalogCtx(t), "app/race", fxA.manifest.dgst)
+		if err != nil {
+			t.Fatalf("TagsSharingDigest: %v", err)
+		}
+		if !reflect.DeepEqual(got, []string{"1.0"}) {
+			t.Errorf("TagsSharingDigest = %v, want [1.0]", got)
+		}
+	})
+
+	t.Run("undeterminable digest errors naming tag", func(t *testing.T) {
+		t.Run("GET 500 error", func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.URL.Path == "/v2/app/err/tags/list":
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write([]byte(`{"name":"app/err","tags":["flaky-tag"]}`))
+				case r.URL.Path == "/v2/app/err/manifests/flaky-tag":
+					if r.Method == http.MethodHead {
+						w.WriteHeader(http.StatusMethodNotAllowed)
+						return
+					}
+					w.WriteHeader(http.StatusInternalServerError)
+					_, _ = w.Write([]byte(`{"errors":[{"code":"INTERNAL","message":"disk fail"}]}`))
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer srv.Close()
+
+			c, _ := NewClient(srv.URL, Options{})
+			_, err := c.TagsSharingDigest(catalogCtx(t), "app/err", fxA.manifest.dgst)
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if !strings.Contains(err.Error(), "flaky-tag") {
+				t.Errorf("err = %q, want it to name flaky-tag", err.Error())
+			}
+		})
+
+		t.Run("malformed digest on HEAD", func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.URL.Path == "/v2/app/err/tags/list":
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write([]byte(`{"name":"app/err","tags":["malformed-tag"]}`))
+				case r.URL.Path == "/v2/app/err/manifests/malformed-tag":
+					w.Header().Set("Docker-Content-Digest", "not-a-valid-digest")
+					w.WriteHeader(http.StatusOK)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer srv.Close()
+
+			c, _ := NewClient(srv.URL, Options{})
+			_, err := c.TagsSharingDigest(catalogCtx(t), "app/err", fxA.manifest.dgst)
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if !strings.Contains(err.Error(), "malformed-tag") {
+				t.Errorf("err = %q, want it to name malformed-tag", err.Error())
+			}
+		})
+
+		t.Run("digest mismatch on GET", func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.URL.Path == "/v2/app/err/tags/list":
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write([]byte(`{"name":"app/err","tags":["mismatch-tag"]}`))
+				case r.URL.Path == "/v2/app/err/manifests/mismatch-tag":
+					if r.Method == http.MethodHead {
+						w.WriteHeader(http.StatusOK)
+						return
+					}
+					w.Header().Set("Content-Type", fxA.manifest.mediaType)
+					w.Header().Set("Docker-Content-Digest", "sha256:"+strings.Repeat("99", 32))
+					_, _ = w.Write(fxA.manifest.body)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer srv.Close()
+
+			c, _ := NewClient(srv.URL, Options{})
+			_, err := c.TagsSharingDigest(catalogCtx(t), "app/err", fxA.manifest.dgst)
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if !errors.Is(err, ErrDigestMismatch) {
+				t.Errorf("err = %v, want ErrDigestMismatch", err)
+			}
+			if !strings.Contains(err.Error(), "mismatch-tag") {
+				t.Errorf("err = %q, want it to name mismatch-tag", err.Error())
+			}
+		})
+
+		t.Run("HEAD 500 error", func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.URL.Path == "/v2/app/err/tags/list":
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write([]byte(`{"name":"app/err","tags":["head-fail-tag"]}`))
+				case r.URL.Path == "/v2/app/err/manifests/head-fail-tag":
+					w.WriteHeader(http.StatusInternalServerError)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer srv.Close()
+
+			c, _ := NewClient(srv.URL, Options{})
+			_, err := c.TagsSharingDigest(catalogCtx(t), "app/err", fxA.manifest.dgst)
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if !strings.Contains(err.Error(), "head-fail-tag") {
+				t.Errorf("err = %q, want it to name head-fail-tag", err.Error())
+			}
+		})
+	})
 }
 
 func TestDeleteManifest(t *testing.T) {

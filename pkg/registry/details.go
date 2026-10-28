@@ -321,10 +321,17 @@ func (c *Client) fetchConfigBlob(ctx context.Context, repository string, dgst di
 }
 
 // TagsSharingDigest returns every tag of repository whose manifest digest
-// equals dgst. It reuses ListTags and sends a HEAD request for each tag's
-// manifest with the standard manifest Accept header to inspect
-// Docker-Content-Digest without downloading manifest bodies. This reports the
-// blast radius before a manifest delete.
+// equals dgst. It reuses ListTags and probes each tag's manifest with the
+// standard manifest Accept header. It first attempts a lightweight HEAD
+// request to read Docker-Content-Digest without downloading the manifest body.
+// If the registry omits Docker-Content-Digest on HEAD or returns 405 Method Not
+// Allowed, it falls back to a GET request to compute the canonical sha256
+// digest from the body bytes.
+//
+// TagsSharingDigest never under-reports: if a tag's digest cannot be
+// determined (e.g. network failure, non-404 HTTP errors, corrupted digest), it
+// returns an error naming that tag. Tags that return 404 between listing and
+// manifest retrieval have been deleted and are safely skipped.
 func (c *Client) TagsSharingDigest(ctx context.Context, repository string, dgst digest.Digest) ([]string, error) {
 	if err := validRepositoryName(repository); err != nil {
 		return nil, err
@@ -341,7 +348,7 @@ func (c *Client) TagsSharingDigest(ctx context.Context, repository string, dgst 
 	var sharing []string
 	for _, tag := range tags {
 		if err := validTagName(tag); err != nil {
-			continue
+			return nil, fmt.Errorf("registry: invalid tag %q in repository %q: %w", tag, repository, err)
 		}
 		tagDigest, ok, err := c.headManifestDigest(ctx, repository, tag)
 		if err != nil {
@@ -359,28 +366,65 @@ func (c *Client) headManifestDigest(ctx context.Context, repository, tag string)
 		c.urlFor("/v2/"+repository+"/manifests/"+tag),
 		http.Header{"Accept": {acceptManifests}})
 	if err != nil {
-		return "", false, err
+		return "", false, fmt.Errorf("registry: head manifest for tag %q: %w", tag, err)
 	}
 	body, err := readBody(resp, maxManifestBytes)
 	if err != nil {
-		return "", false, err
+		return "", false, fmt.Errorf("registry: read head manifest response for tag %q: %w", tag, err)
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		return "", false, nil
+	}
+	if resp.StatusCode == http.StatusMethodNotAllowed {
+		return c.getManifestDigest(ctx, repository, tag)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", false, fmt.Errorf("registry: head manifest for tag %q: %w", tag, apiErrorFrom(resp.StatusCode, body))
+	}
+
+	header := strings.TrimSpace(resp.Header.Get("Docker-Content-Digest"))
+	if header == "" {
+		return c.getManifestDigest(ctx, repository, tag)
+	}
+	parsed, err := digest.Parse(header)
+	if err != nil {
+		return "", false, fmt.Errorf("registry: malformed Docker-Content-Digest %q for tag %q: %w", header, tag, err)
+	}
+	return parsed, true, nil
+}
+
+func (c *Client) getManifestDigest(ctx context.Context, repository, tag string) (digest.Digest, bool, error) {
+	resp, err := c.doURL(ctx, http.MethodGet,
+		c.urlFor("/v2/"+repository+"/manifests/"+tag),
+		http.Header{"Accept": {acceptManifests}})
+	if err != nil {
+		return "", false, fmt.Errorf("registry: get manifest for tag %q: %w", tag, err)
+	}
+	body, err := readBody(resp, maxManifestBytes)
+	if err != nil {
+		return "", false, fmt.Errorf("registry: read manifest for tag %q: %w", tag, err)
 	}
 	if resp.StatusCode == http.StatusNotFound {
 		return "", false, nil
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", false, apiErrorFrom(resp.StatusCode, body)
+		return "", false, fmt.Errorf("registry: get manifest for tag %q: %w", tag, apiErrorFrom(resp.StatusCode, body))
+	}
+	if len(body) == 0 {
+		return "", false, fmt.Errorf("registry: tag %q has empty manifest body", tag)
 	}
 
-	header := strings.TrimSpace(resp.Header.Get("Docker-Content-Digest"))
-	if header == "" {
-		return "", false, nil
+	bodyDigest := digest.FromBytes(body)
+	if header := strings.TrimSpace(resp.Header.Get("Docker-Content-Digest")); header != "" {
+		headerDigest, err := digest.Parse(header)
+		if err != nil {
+			return "", false, fmt.Errorf("registry: malformed Docker-Content-Digest %q for tag %q: %w", header, tag, err)
+		}
+		if headerDigest != bodyDigest {
+			return "", false, fmt.Errorf("registry: tag %q: %w: header says %s, body is %s", tag, ErrDigestMismatch, headerDigest, bodyDigest)
+		}
 	}
-	parsed, err := digest.Parse(header)
-	if err != nil {
-		return "", false, fmt.Errorf("registry: malformed Docker-Content-Digest %q", header)
-	}
-	return parsed, true, nil
+	return bodyDigest, true, nil
 }
 
 // DeleteManifest deletes a manifest from repository by digest

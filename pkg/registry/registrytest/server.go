@@ -91,6 +91,16 @@ type Config struct {
 	// (mirroring REGISTRY_STORAGE_DELETE_ENABLED in registry:2). When false
 	// (the default), manifest deletes are refused with 405 UNSUPPORTED.
 	DeleteEnabled bool
+
+	// OmitDigestOnHead, when true, omits the Docker-Content-Digest header on
+	// HEAD responses for /v2/<name>/manifests/<ref> (modelling registries
+	// that only supply the header on GET).
+	OmitDigestOnHead bool
+
+	// ManifestHead405, when true, answers 405 Method Not Allowed to HEAD
+	// requests on /v2/<name>/manifests/<ref> (modelling registries that do
+	// not support HEAD on manifests).
+	ManifestHead405 bool
 }
 
 // Repository is one repository in the fake registry.
@@ -240,6 +250,22 @@ func (s *Server) SetDeleteEnabled(enabled bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.cfg.DeleteEnabled = enabled
+}
+
+// SetOmitDigestOnHead toggles whether the Docker-Content-Digest header is
+// omitted on HEAD responses for manifests.
+func (s *Server) SetOmitDigestOnHead(omit bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cfg.OmitDigestOnHead = omit
+}
+
+// SetManifestHead405 toggles whether HEAD /v2/<name>/manifests/<ref> is
+// refused with 405 Method Not Allowed.
+func (s *Server) SetManifestHead405(enabled bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cfg.ManifestHead405 = enabled
 }
 
 // BlobServer is a second in-process HTTP server (modelling a CDN or S3
@@ -565,6 +591,8 @@ func isHead(r *http.Request) bool { return r.Method == http.MethodHead }
 // repository, where ref is a tag or a digest.
 func (s *Server) handleManifest(w http.ResponseWriter, r *http.Request, name, ref string) {
 	s.mu.Lock()
+	head405 := s.cfg.ManifestHead405
+	omitDigest := s.cfg.OmitDigestOnHead
 	repo, ok := s.byName[name]
 	var manifest *Manifest
 	if ok {
@@ -591,6 +619,11 @@ func (s *Server) handleManifest(w http.ResponseWriter, r *http.Request, name, re
 	}
 	s.mu.Unlock()
 
+	if isHead(r) && head405 {
+		writeOCIError(w, http.StatusMethodNotAllowed, "UNSUPPORTED", "registrytest: method not allowed")
+		return
+	}
+
 	if !ok {
 		writeOCIError(w, http.StatusNotFound, "NAME_UNKNOWN",
 			fmt.Sprintf("repository name not known to registry: %s", name))
@@ -603,7 +636,9 @@ func (s *Server) handleManifest(w http.ResponseWriter, r *http.Request, name, re
 	}
 
 	w.Header().Set("Content-Type", manifest.MediaType)
-	w.Header().Set("Docker-Content-Digest", contentDigest(*manifest))
+	if !(isHead(r) && omitDigest) {
+		w.Header().Set("Docker-Content-Digest", contentDigest(*manifest))
+	}
 	w.WriteHeader(http.StatusOK)
 	if isHead(r) {
 		return
