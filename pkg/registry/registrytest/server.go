@@ -80,6 +80,17 @@ type Config struct {
 
 	// TagsPageSize does the same for /v2/<name>/tags/list.
 	TagsPageSize int
+
+	// BlobRedirectBaseURL, when set, causes GET/HEAD /v2/<name>/blobs/<digest>
+	// (after registry authentication succeeds) to respond with 307 Temporary
+	// Redirect to "<BlobRedirectBaseURL>/blobs/<name>/<digest>" instead of
+	// serving the blob directly.
+	BlobRedirectBaseURL string
+
+	// DeleteEnabled toggles support for DELETE /v2/<name>/manifests/<digest>
+	// (mirroring REGISTRY_STORAGE_DELETE_ENABLED in registry:2). When false
+	// (the default), manifest deletes are refused with 405 UNSUPPORTED.
+	DeleteEnabled bool
 }
 
 // Repository is one repository in the fake registry.
@@ -92,6 +103,9 @@ type Repository struct {
 	// children of a multi-arch index) served by digest at
 	// /v2/<name>/manifests/<digest> without appearing in /v2/<name>/tags/list.
 	Manifests []Manifest
+	// Blobs maps digest string to raw blob bytes served at
+	// /v2/<name>/blobs/<digest>.
+	Blobs map[string][]byte
 }
 
 // Manifest is what the server serves for a tag (or digest) reference.
@@ -152,7 +166,19 @@ func New(cfg Config) *Server {
 		issued: map[string]issuedToken{},
 	}
 	for _, repo := range cfg.Repositories {
-		s.byName[repo.Name] = repo
+		cloned := Repository{
+			Name:      repo.Name,
+			Tags:      make(map[string]Manifest, len(repo.Tags)),
+			Manifests: append([]Manifest(nil), repo.Manifests...),
+			Blobs:     make(map[string][]byte, len(repo.Blobs)),
+		}
+		for k, v := range repo.Tags {
+			cloned.Tags[k] = v
+		}
+		for k, v := range repo.Blobs {
+			cloned.Blobs[k] = v
+		}
+		s.byName[repo.Name] = cloned
 	}
 	s.srv = httptest.NewUnstartedServer(s.handler())
 	// Clients are expected to probe https against the plain-http port (the
@@ -199,6 +225,102 @@ func (s *Server) SetRealmBaseURL(base string) {
 	s.cfg.RealmBaseURL = base
 }
 
+// SetBlobRedirectBaseURL configures the base URL (e.g. a second httptest
+// server's URL) that GET/HEAD /v2/<name>/blobs/<digest> redirects to. Pass ""
+// to disable blob redirects and serve blobs directly again.
+func (s *Server) SetBlobRedirectBaseURL(base string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cfg.BlobRedirectBaseURL = base
+}
+
+// SetDeleteEnabled toggles whether DELETE /v2/<name>/manifests/<digest> is
+// allowed (202 Accepted) or refused (405 UNSUPPORTED).
+func (s *Server) SetDeleteEnabled(enabled bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cfg.DeleteEnabled = enabled
+}
+
+// BlobServer is a second in-process HTTP server (modelling a CDN or S3
+// object store) that serves blob redirects from a Server and records every
+// request it receives (scheme-only Authorization, never raw secrets).
+type BlobServer struct {
+	srv      *httptest.Server
+	reg      *Server
+	mu       sync.Mutex
+	recorded []Request
+}
+
+// NewBlobRedirectServer starts a second httptest.Server that serves this
+// registry's blobs at /blobs/<name>/<digest> and points s's
+// BlobRedirectBaseURL at it. Call Close on the returned BlobServer when done.
+func (s *Server) NewBlobRedirectServer() *BlobServer {
+	bs := &BlobServer{reg: s}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/blobs/", bs.handleBlob)
+	bs.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec := summarizeRequest(r)
+		bs.mu.Lock()
+		bs.recorded = append(bs.recorded, rec)
+		bs.mu.Unlock()
+		mux.ServeHTTP(w, r)
+	}))
+	s.SetBlobRedirectBaseURL(bs.srv.URL)
+	return bs
+}
+
+// Close shuts the blob redirect server down.
+func (bs *BlobServer) Close() { bs.srv.Close() }
+
+// URL returns the base URL of the blob redirect server.
+func (bs *BlobServer) URL() string { return bs.srv.URL }
+
+// Requests returns a copy of every request the blob server received.
+func (bs *BlobServer) Requests() []Request {
+	bs.mu.Lock()
+	defer bs.mu.Unlock()
+	out := make([]Request, len(bs.recorded))
+	copy(out, bs.recorded)
+	return out
+}
+
+func (bs *BlobServer) handleBlob(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	rest := strings.TrimPrefix(r.URL.Path, "/blobs/")
+	idx := strings.LastIndex(rest, "/")
+	if idx <= 0 || idx == len(rest)-1 {
+		http.NotFound(w, r)
+		return
+	}
+	name, dgst := rest[:idx], rest[idx+1:]
+
+	bs.reg.mu.Lock()
+	repo, ok := bs.reg.byName[name]
+	var blob []byte
+	var hasBlob bool
+	if ok && repo.Blobs != nil {
+		blob, hasBlob = repo.Blobs[dgst]
+	}
+	bs.reg.mu.Unlock()
+
+	if !ok || !hasBlob {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Docker-Content-Digest", digest.FromBytes(blob).String())
+	w.Header().Set("Content-Length", strconv.Itoa(len(blob)))
+	w.WriteHeader(http.StatusOK)
+	if isHead(r) {
+		return
+	}
+	_, _ = w.Write(blob)
+}
+
 // Requests returns a copy of every recorded request, in order.
 func (s *Server) Requests() []Request {
 	s.mu.Lock()
@@ -228,8 +350,8 @@ func (s *Server) TokensIssued() int {
 }
 
 // handler builds the full mux: recording middleware around the auth-aware
-// /v2/ tree (ping, catalog, tags, manifests), the /token realm, and a
-// catch-all returning OCI-shaped errors.
+// /v2/ tree (ping, catalog, tags, manifests, blobs, deletes), the /token
+// realm, and a catch-all returning OCI-shaped errors.
 func (s *Server) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v2/", s.handleV2)
@@ -240,17 +362,30 @@ func (s *Server) handler() http.Handler {
 	return s.recordMiddleware(mux)
 }
 
-// handleV2 routes the /v2/ tree: the ping, the catalog, tags lists and
-// manifest fetches, everything else 404.
+// handleV2 routes the /v2/ tree: the ping, the catalog, tags lists,
+// manifest fetches/deletes, and blob fetches, everything else 404.
 func (s *Server) handleV2(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Docker-Distribution-Api-Version", "registry/2.0")
+
+	path := r.URL.Path
+	if r.Method == http.MethodDelete {
+		rest := strings.TrimPrefix(path, "/v2/")
+		if name, ref, ok := strings.Cut(rest, "/manifests/"); ok && name != "" && ref != "" {
+			if !s.authorize(w, r, repositoryDeleteScope(name)) {
+				return
+			}
+			s.handleDeleteManifest(w, r, name, ref)
+			return
+		}
+		writeOCIError(w, http.StatusMethodNotAllowed, "UNSUPPORTED", "registrytest: method not allowed")
+		return
+	}
 
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		writeOCIError(w, http.StatusMethodNotAllowed, "UNSUPPORTED", "registrytest: method not allowed")
 		return
 	}
 
-	path := r.URL.Path
 	switch {
 	case path == "/v2/" || path == "/v2":
 		if !s.authorize(w, r, "") {
@@ -281,6 +416,13 @@ func (s *Server) handleV2(w http.ResponseWriter, r *http.Request) {
 			s.handleManifest(w, r, name, ref)
 			return
 		}
+		if name, dgst, ok := strings.Cut(rest, "/blobs/"); ok && name != "" && dgst != "" {
+			if !s.authorize(w, r, repositoryScope(name)) {
+				return
+			}
+			s.handleBlob(w, r, name, dgst)
+			return
+		}
 		writeOCIError(w, http.StatusNotFound, "NAME_UNKNOWN", "registrytest: unknown endpoint "+path)
 	}
 }
@@ -289,6 +431,12 @@ func (s *Server) handleV2(w http.ResponseWriter, r *http.Request) {
 // in its Bearer challenges.
 func repositoryScope(name string) string {
 	return "repository:" + name + ":pull"
+}
+
+// repositoryDeleteScope is the delete scope a manifest DELETE endpoint
+// demands and names in its Bearer challenges.
+func repositoryDeleteScope(name string) string {
+	return "repository:" + name + ":delete"
 }
 
 // authorize enforces Config.Auth for one /v2/ request needing the given
@@ -319,6 +467,8 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request, scope string)
 
 // catalogNames returns the configured repository names, sorted.
 func (s *Server) catalogNames() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	names := make([]string, 0, len(s.byName))
 	for name := range s.byName {
 		names = append(names, name)
@@ -338,15 +488,20 @@ func (s *Server) handleCatalog(w http.ResponseWriter, r *http.Request) {
 
 // handleTags serves GET /v2/<name>/tags/list for a known repository.
 func (s *Server) handleTags(w http.ResponseWriter, r *http.Request, name string) {
+	s.mu.Lock()
 	repo, ok := s.byName[name]
+	var tags []string
+	if ok {
+		tags = make([]string, 0, len(repo.Tags))
+		for tag := range repo.Tags {
+			tags = append(tags, tag)
+		}
+	}
+	s.mu.Unlock()
 	if !ok {
 		writeOCIError(w, http.StatusNotFound, "NAME_UNKNOWN",
 			fmt.Sprintf("repository name not known to registry: %s", name))
 		return
-	}
-	tags := make([]string, 0, len(repo.Tags))
-	for tag := range repo.Tags {
-		tags = append(tags, tag)
 	}
 	sort.Strings(tags)
 	path := "/v2/" + name + "/tags/list"
@@ -409,33 +564,37 @@ func isHead(r *http.Request) bool { return r.Method == http.MethodHead }
 // handleManifest serves GET /v2/<name>/manifests/<ref> for a known
 // repository, where ref is a tag or a digest.
 func (s *Server) handleManifest(w http.ResponseWriter, r *http.Request, name, ref string) {
+	s.mu.Lock()
 	repo, ok := s.byName[name]
-	if !ok {
-		writeOCIError(w, http.StatusNotFound, "NAME_UNKNOWN",
-			fmt.Sprintf("repository name not known to registry: %s", name))
-		return
-	}
-
 	var manifest *Manifest
-	if _, err := digest.Parse(ref); err == nil {
-		for _, tag := range sortedTagNames(repo.Tags) {
-			m := repo.Tags[tag]
-			if contentDigest(m) == ref {
-				manifest = &m
-				break
-			}
-		}
-		if manifest == nil {
-			for i := range repo.Manifests {
-				m := repo.Manifests[i]
+	if ok {
+		if _, err := digest.Parse(ref); err == nil {
+			for _, tag := range sortedTagNames(repo.Tags) {
+				m := repo.Tags[tag]
 				if contentDigest(m) == ref {
 					manifest = &m
 					break
 				}
 			}
+			if manifest == nil {
+				for i := range repo.Manifests {
+					m := repo.Manifests[i]
+					if contentDigest(m) == ref {
+						manifest = &m
+						break
+					}
+				}
+			}
+		} else if m, isTag := repo.Tags[ref]; isTag {
+			manifest = &m
 		}
-	} else if m, isTag := repo.Tags[ref]; isTag {
-		manifest = &m
+	}
+	s.mu.Unlock()
+
+	if !ok {
+		writeOCIError(w, http.StatusNotFound, "NAME_UNKNOWN",
+			fmt.Sprintf("repository name not known to registry: %s", name))
+		return
 	}
 	if manifest == nil {
 		writeOCIError(w, http.StatusNotFound, "MANIFEST_UNKNOWN",
@@ -450,6 +609,100 @@ func (s *Server) handleManifest(w http.ResponseWriter, r *http.Request, name, re
 		return
 	}
 	_, _ = w.Write(manifest.Body)
+}
+
+// handleBlob serves GET/HEAD /v2/<name>/blobs/<digest> or redirects to
+// Config.BlobRedirectBaseURL when configured.
+func (s *Server) handleBlob(w http.ResponseWriter, r *http.Request, name, dgst string) {
+	s.mu.Lock()
+	repo, ok := s.byName[name]
+	var blob []byte
+	var hasBlob bool
+	if ok && repo.Blobs != nil {
+		blob, hasBlob = repo.Blobs[dgst]
+	}
+	redirectBase := s.cfg.BlobRedirectBaseURL
+	s.mu.Unlock()
+
+	if !ok {
+		writeOCIError(w, http.StatusNotFound, "NAME_UNKNOWN",
+			fmt.Sprintf("repository name not known to registry: %s", name))
+		return
+	}
+	if !hasBlob {
+		writeOCIError(w, http.StatusNotFound, "BLOB_UNKNOWN",
+			fmt.Sprintf("blob unknown to registry: %s/%s", name, dgst))
+		return
+	}
+
+	if redirectBase != "" {
+		target := strings.TrimSuffix(redirectBase, "/") + "/blobs/" + name + "/" + dgst
+		http.Redirect(w, r, target, http.StatusTemporaryRedirect)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Docker-Content-Digest", digest.FromBytes(blob).String())
+	w.Header().Set("Content-Length", strconv.Itoa(len(blob)))
+	w.WriteHeader(http.StatusOK)
+	if isHead(r) {
+		return
+	}
+	_, _ = w.Write(blob)
+}
+
+// handleDeleteManifest serves DELETE /v2/<name>/manifests/<digest>. When
+// DeleteEnabled is false, it answers 405 UNSUPPORTED; when true, it removes
+// every tag and untagged manifest entry matching digest and answers 202.
+func (s *Server) handleDeleteManifest(w http.ResponseWriter, _ *http.Request, name, ref string) {
+	s.mu.Lock()
+	deleteEnabled := s.cfg.DeleteEnabled
+	repo, ok := s.byName[name]
+	if !deleteEnabled {
+		s.mu.Unlock()
+		writeOCIError(w, http.StatusMethodNotAllowed, "UNSUPPORTED", "The operation is unsupported.")
+		return
+	}
+	if !ok {
+		s.mu.Unlock()
+		writeOCIError(w, http.StatusNotFound, "NAME_UNKNOWN",
+			fmt.Sprintf("repository name not known to registry: %s", name))
+		return
+	}
+	if _, err := digest.Parse(ref); err != nil {
+		s.mu.Unlock()
+		writeOCIError(w, http.StatusBadRequest, "UNSUPPORTED", "manifest delete requires a digest reference")
+		return
+	}
+
+	deleted := false
+	for tag, m := range repo.Tags {
+		if contentDigest(m) == ref {
+			delete(repo.Tags, tag)
+			deleted = true
+		}
+	}
+	if len(repo.Manifests) > 0 {
+		var kept []Manifest
+		for _, m := range repo.Manifests {
+			if contentDigest(m) == ref {
+				deleted = true
+				continue
+			}
+			kept = append(kept, m)
+		}
+		repo.Manifests = kept
+	}
+	s.byName[name] = repo
+	s.mu.Unlock()
+
+	if !deleted {
+		writeOCIError(w, http.StatusNotFound, "MANIFEST_UNKNOWN",
+			fmt.Sprintf("manifest unknown to registry: %s/%s", name, ref))
+		return
+	}
+
+	w.WriteHeader(http.StatusAccepted)
 }
 
 // contentDigest is a manifest's advertised digest: the override when set,
@@ -552,9 +805,10 @@ func (s *Server) recordMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// record appends the scheme-only view of a request. Never record header
-// values: no token, no password, nothing that could leak into a test dump.
-func (s *Server) record(r *http.Request) {
+// summarizeRequest builds the scheme-only view of an incoming request. Never
+// record header values: no token, no password, nothing that could leak into a
+// test dump.
+func summarizeRequest(r *http.Request) Request {
 	rec := Request{
 		Method:   r.Method,
 		Path:     r.URL.Path,
@@ -574,6 +828,12 @@ func (s *Server) record(r *http.Request) {
 			rec.Authorization = "other"
 		}
 	}
+	return rec
+}
+
+// record appends the scheme-only view of a request.
+func (s *Server) record(r *http.Request) {
+	rec := summarizeRequest(r)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.recorded = append(s.recorded, rec)

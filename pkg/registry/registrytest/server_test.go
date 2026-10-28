@@ -657,3 +657,105 @@ func TestServerBearerScopeEnforcement(t *testing.T) {
 		t.Errorf("repo-scoped token at _catalog: status %d, want 401 (wrong scope)", code)
 	}
 }
+
+// --- blobs, blob redirect and manifest delete (L1.3) --------------------
+
+func TestServerBlobsAndRedirect(t *testing.T) {
+	blobBytes := []byte(`{"architecture":"amd64","os":"linux"}`)
+	blobDigest := digest.FromBytes(blobBytes).String()
+
+	s := New(Config{
+		Repositories: []Repository{
+			{
+				Name:  "alpha",
+				Blobs: map[string][]byte{blobDigest: blobBytes},
+			},
+		},
+	})
+	defer s.Close()
+
+	t.Run("direct blob fetch", func(t *testing.T) {
+		status, header, body := getBody(t, s.URL()+"/v2/alpha/blobs/"+blobDigest)
+		if status != http.StatusOK {
+			t.Fatalf("status = %d, want 200", status)
+		}
+		if header.Get("Docker-Content-Digest") != blobDigest {
+			t.Errorf("Docker-Content-Digest = %q, want %q", header.Get("Docker-Content-Digest"), blobDigest)
+		}
+		if string(body) != string(blobBytes) {
+			t.Errorf("body = %q, want %q", body, blobBytes)
+		}
+	})
+
+	t.Run("unknown blob 404s with BLOB_UNKNOWN", func(t *testing.T) {
+		status, _, body := getBody(t, s.URL()+"/v2/alpha/blobs/sha256:"+strings.Repeat("0", 64))
+		if status != http.StatusNotFound || !strings.Contains(string(body), "BLOB_UNKNOWN") {
+			t.Errorf("status=%d body=%s, want 404 BLOB_UNKNOWN", status, body)
+		}
+	})
+
+	t.Run("redirect to second server", func(t *testing.T) {
+		blobSrv := s.NewBlobRedirectServer()
+		defer blobSrv.Close()
+		defer s.SetBlobRedirectBaseURL("")
+
+		status, _, body := getBody(t, s.URL()+"/v2/alpha/blobs/"+blobDigest)
+		if status != http.StatusOK || string(body) != string(blobBytes) {
+			t.Fatalf("status=%d body=%q after redirect", status, body)
+		}
+		if got := len(blobSrv.Requests()); got != 1 {
+			t.Errorf("blobSrv requests = %d, want 1", got)
+		}
+	})
+}
+
+func TestServerDeleteManifestToggleAndCoTagged(t *testing.T) {
+	single, index, singleDgst, _ := fixtureManifests(t)
+	s := New(Config{
+		Repositories: []Repository{
+			{
+				Name: "alpha",
+				Tags: map[string]Manifest{
+					"1.0":    single,
+					"latest": single,
+					"multi":  index,
+				},
+			},
+		},
+	})
+	defer s.Close()
+
+	doDelete := func(ref string) int {
+		req, err := http.NewRequest(http.MethodDelete, s.URL()+"/v2/alpha/manifests/"+ref, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		_, _ = io.Copy(io.Discard, resp.Body)
+		return resp.StatusCode
+	}
+
+	// Default: DeleteEnabled is false -> 405 Method Not Allowed.
+	if status := doDelete(singleDgst); status != http.StatusMethodNotAllowed {
+		t.Fatalf("delete when disabled: status = %d, want 405", status)
+	}
+
+	// Enable delete -> 202 Accepted, and both "1.0" and "latest" are removed.
+	s.SetDeleteEnabled(true)
+	if status := doDelete(singleDgst); status != http.StatusAccepted {
+		t.Fatalf("delete when enabled: status = %d, want 202", status)
+	}
+	if status, _, _ := getBody(t, s.URL()+"/v2/alpha/manifests/1.0"); status != http.StatusNotFound {
+		t.Errorf("tag 1.0 status after digest delete = %d, want 404", status)
+	}
+	if status, _, _ := getBody(t, s.URL()+"/v2/alpha/manifests/latest"); status != http.StatusNotFound {
+		t.Errorf("tag latest status after digest delete = %d, want 404", status)
+	}
+	if status, _, _ := getBody(t, s.URL()+"/v2/alpha/manifests/multi"); status != http.StatusOK {
+		t.Errorf("unrelated tag multi status = %d, want 200", status)
+	}
+}
