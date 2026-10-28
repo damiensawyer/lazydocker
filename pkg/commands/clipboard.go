@@ -186,9 +186,9 @@ func (c *OSCommand) BuildOSC52(text string) string {
 
 	if c.getEnv("TMUX") != "" {
 		// Inside tmux ($TMUX set) wrap in tmux passthrough:
-		// "\x1bPtmux;\x1b" + seq with each ESC doubled + "\x1b\\"
+		// "\x1bPtmux;" + seq with each ESC doubled + "\x1b\\" (tmux passthrough)
 		escapedSeq := strings.ReplaceAll(seq, "\x1b", "\x1b\x1b")
-		return "\x1bPtmux;\x1b" + escapedSeq + "\x1b\\"
+		return "\x1bPtmux;" + escapedSeq + "\x1b\\"
 	}
 
 	if c.getEnv("STY") != "" {

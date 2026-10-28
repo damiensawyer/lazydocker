@@ -48,7 +48,7 @@ func TestOSC52ExactBytes(t *testing.T) {
 
 		inner := fmt.Sprintf("\x1b]52;c;%s\x07", b64)
 		escaped := strings.ReplaceAll(inner, "\x1b", "\x1b\x1b")
-		expected := "\x1bPtmux;\x1b" + escaped + "\x1b\\"
+		expected := "\x1bPtmux;" + escaped + "\x1b\\"
 
 		actual := c.BuildOSC52(text)
 		assert.Equal(t, expected, actual)
