@@ -18,6 +18,8 @@ import (
 	"github.com/jesseduffield/lazydocker/pkg/gui/panels"
 	"github.com/jesseduffield/lazydocker/pkg/gui/types"
 	"github.com/jesseduffield/lazydocker/pkg/i18n"
+	"github.com/jesseduffield/lazydocker/pkg/registry"
+	"github.com/jesseduffield/lazydocker/pkg/registry/credentials"
 	"github.com/jesseduffield/lazydocker/pkg/tasks"
 	"github.com/sasha-s/go-deadlock"
 	"github.com/sirupsen/logrus"
@@ -50,6 +52,18 @@ type Gui struct {
 	Mutexes
 
 	Panels Panels
+
+	// registriesState backs the Registries side panel's async refresh:
+	// first-focus gate and generation counter (D-09, S-03). See
+	// registries_panel.go.
+	registriesState registriesState
+
+	// Injectable Registries-panel hooks (D-09): nil means the real
+	// implementations (credentials.Discover / the credential-resolving
+	// ping). Tests swap them for fakes so that nothing ever touches
+	// ~/.docker, a credential helper, or the network.
+	registriesDiscoverFn func() ([]credentials.AuthSource, error)
+	registriesPingFn     func(ctx context.Context, host string) (registry.PingResult, error)
 }
 
 type Panels struct {
@@ -59,6 +73,7 @@ type Panels struct {
 	Images     *panels.SideListPanel[*commands.Image]
 	Volumes    *panels.SideListPanel[*commands.Volume]
 	Networks   *panels.SideListPanel[*commands.Network]
+	Registries *panels.SideListPanel[*registryItem]
 	Menu       *panels.SideListPanel[*types.MenuItem]
 }
 
@@ -345,6 +360,7 @@ func (gui *Gui) setPanels() {
 		Images:     gui.getImagesPanel(),
 		Volumes:    gui.getVolumesPanel(),
 		Networks:   gui.getNetworksPanel(),
+		Registries: gui.getRegistriesPanel(),
 		Menu:       gui.getMenuPanel(),
 	}
 }

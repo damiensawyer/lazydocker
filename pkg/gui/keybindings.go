@@ -447,6 +447,13 @@ func (gui *Gui) GetInitialKeybindings() []*Binding {
 			Description: gui.Tr.ViewBulkCommands,
 		},
 		{
+			ViewName:    "registries",
+			Key:         'r',
+			Modifier:    gocui.ModNone,
+			Handler:     gui.handleRegistriesRefresh,
+			Description: gui.Tr.RefreshRegistries,
+		},
+		{
 			ViewName:    "main",
 			Key:         gocui.KeyEsc,
 			Modifier:    gocui.ModNone,
@@ -594,6 +601,7 @@ func (gui *Gui) GetInitialKeybindings() []*Binding {
 		{Handler: gui.handleGoTo(gui.Panels.Images.View), Key: '4', Description: gui.Tr.FocusImages},
 		{Handler: gui.handleGoTo(gui.Panels.Volumes.View), Key: '5', Description: gui.Tr.FocusVolumes},
 		{Handler: gui.handleGoTo(gui.Panels.Networks.View), Key: '6', Description: gui.Tr.FocusNetworks},
+		{Handler: gui.handleGoTo(gui.Panels.Registries.View), Key: '7', Description: gui.Tr.FocusRegistries},
 	}...)
 
 	for _, panel := range gui.allListPanels() {

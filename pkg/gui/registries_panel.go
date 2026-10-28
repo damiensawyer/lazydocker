@@ -1,0 +1,349 @@
+package gui
+
+import (
+	"context"
+	"errors"
+	"time"
+
+	"github.com/fatih/color"
+	"github.com/jesseduffield/gocui"
+	"github.com/jesseduffield/lazydocker/pkg/gui/panels"
+	"github.com/jesseduffield/lazydocker/pkg/registry"
+	"github.com/jesseduffield/lazydocker/pkg/registry/credentials"
+	"github.com/jesseduffield/lazydocker/pkg/tasks"
+	"github.com/jesseduffield/lazydocker/pkg/utils"
+	"github.com/sasha-s/go-deadlock"
+)
+
+// The Registries side panel (L3.1): registry connections discovered from the
+// user's docker/podman auth config, pinged asynchronously with a status and
+// response duration per row. The panel exists next to Images/Volumes/Networks
+// but, per D-09, does nothing — no config read, no credential-helper exec, no
+// network — until it first gets focus (onRegistriesPanelFocused, called from
+// switchFocusAux).
+
+// registriesPingTimeout bounds one registry ping, including the credential
+// resolution that precedes it (a credential helper can block on a keychain
+// prompt; the row must not stay "checking" forever).
+const registriesPingTimeout = 20 * time.Second
+
+// registriesState is the mutable state behind the Registries panel's async
+// refresh (S-03): a generation counter that invalidates in-flight work.
+type registriesState struct {
+	mu deadlock.Mutex
+	// loaded: the first refresh has been kicked off (which happens at first
+	// focus, not at startup — D-09).
+	loaded bool
+	// generation: bumped by every refresh; discovery sets and ping results
+	// from an older generation are dropped when they land.
+	generation uint64
+}
+
+// beginRefresh marks the panel loaded and opens a new generation. Synchronous
+// on purpose: the caller must know its generation before any goroutine runs.
+func (s *registriesState) beginRefresh() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.loaded = true
+	s.generation++
+	return s.generation
+}
+
+// isCurrent reports whether gen is still the newest generation.
+func (s *registriesState) isCurrent(gen uint64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.generation == gen
+}
+
+func (gui *Gui) getRegistriesPanel() *panels.SideListPanel[*registryItem] {
+	return &panels.SideListPanel[*registryItem]{
+		ContextState: &panels.ContextState[*registryItem]{
+			GetMainTabs: func() []panels.MainTab[*registryItem] {
+				return []panels.MainTab[*registryItem]{
+					{
+						Key:    "summary",
+						Title:  gui.Tr.RegistriesSummaryTitle,
+						Render: gui.renderRegistrySummary,
+					},
+				}
+			},
+			// Status and duration are part of the cache key so a landed ping
+			// re-renders the summary of the selected row (the periodic
+			// checkForContextChange calls HandleSelect every second).
+			GetItemContextCacheKey: func(item *registryItem) string {
+				return "registries-" + item.Host + "-" + string(item.Status) + "-" + item.Duration.String() + "-" + item.Err
+			},
+		},
+		ListPanel: panels.ListPanel[*registryItem]{
+			List: panels.NewFilteredList[*registryItem](),
+			View: gui.Views.Registries,
+		},
+		NoItemsMessage: gui.Tr.NoRegistries,
+		Gui:            gui.intoInterface(),
+		Sort: func(a, b *registryItem) bool {
+			return a.Host < b.Host
+		},
+		GetTableCells: gui.getRegistriesDisplayStrings,
+		GetItemKey: func(item *registryItem) string {
+			return item.Host
+		},
+		// `registries: { enabled: false }` hides the panel entirely (zero
+		// regression: users who never open the panel see stock lazydocker).
+		Hide: func() bool {
+			if gui.Config == nil || gui.Config.UserConfig == nil {
+				return false
+			}
+			return !gui.Config.UserConfig.Registries.Enabled
+		},
+	}
+}
+
+func (gui *Gui) renderRegistrySummary(item *registryItem) tasks.TaskFunc {
+	return gui.NewSimpleRenderStringTask(func() string { return gui.registriesSummaryStr(item) })
+}
+
+// registriesSummaryStr renders the selected registry's summary (the panel's
+// one main tab). Only secret-free fields: username, source file, status,
+// duration, and the registry/credentials packages' own (already sanitized)
+// error messages. A secret is never held here, let alone rendered.
+func (gui *Gui) registriesSummaryStr(item *registryItem) string {
+	padding := 15
+	output := ""
+	output += utils.WithPadding(gui.Tr.RegistriesSummaryRegistry, padding) + gui.registriesHostDisplay(item) + "\n"
+	output += utils.WithPadding(gui.Tr.RegistriesSummaryUsername, padding) + item.Username + "\n"
+	output += utils.WithPadding(gui.Tr.RegistriesSummarySourceFile, padding) + item.SourceFile + "\n"
+	output += utils.WithPadding(gui.Tr.RegistriesSummaryStatus, padding) + utils.Decolorise(gui.registriesStatusDisplay(item.Status)) + "\n"
+	if d := registriesDurationDisplay(item.Duration); d != "" {
+		output += utils.WithPadding(gui.Tr.RegistriesSummaryResponseTime, padding) + d + "\n"
+	}
+	if item.Err != "" {
+		output += "\n" + item.Err + "\n"
+	}
+	return output
+}
+
+func (gui *Gui) getRegistriesDisplayStrings(item *registryItem) []string {
+	return []string{
+		gui.registriesStatusDisplay(item.Status),
+		gui.registriesHostDisplay(item),
+		item.Username,
+	}
+}
+
+// registriesHostDisplay renders the host with the auto-detected marker;
+// auto-detected rows come from the user's auth config and are not editable
+// (saved connections, until they land, are every row's origin).
+func (gui *Gui) registriesHostDisplay(item *registryItem) string {
+	if item.AutoDetected {
+		return item.Host + " " + gui.Tr.RegistriesAutoDetectedSuffix
+	}
+	return item.Host
+}
+
+func (gui *Gui) registriesStatusDisplay(status registryItemStatus) string {
+	switch status {
+	case registryItemStatusOnline:
+		return utils.ColoredString(gui.Tr.RegistriesStatusOnline, color.FgGreen)
+	case registryItemStatusOffline:
+		return utils.ColoredString(gui.Tr.RegistriesStatusOffline, color.FgRed)
+	case registryItemStatusUnauthorized:
+		return utils.ColoredString(gui.Tr.RegistriesStatusUnauthorized, color.FgYellow)
+	default:
+		return gui.Tr.RegistriesStatusChecking
+	}
+}
+
+func registriesDurationDisplay(d time.Duration) string {
+	if d <= 0 {
+		return ""
+	}
+	return d.Round(time.Millisecond).String()
+}
+
+// onRegistriesPanelFocused is the D-09 gate. It runs whenever the Registries
+// view gains focus; on the first focus it kicks the initial refresh, and
+// never does anything before that. Later refocuses do not re-ping — the
+// panel's refresh key does.
+func (gui *Gui) onRegistriesPanelFocused() {
+	if gui.Panels.Registries == nil || gui.Panels.Registries.IsHidden() {
+		return
+	}
+
+	gui.registriesState.mu.Lock()
+	alreadyLoaded := gui.registriesState.loaded
+	gui.registriesState.mu.Unlock()
+
+	if alreadyLoaded {
+		return
+	}
+	gui.refreshRegistries()
+}
+
+// handleRegistriesRefresh is the panel's refresh keybinding ('r'): re-discover
+// auth sources and re-ping every registry, dropping any in-flight results
+// from the previous round.
+func (gui *Gui) handleRegistriesRefresh(g *gocui.Gui, v *gocui.View) error {
+	gui.refreshRegistries()
+	return nil
+}
+
+// refreshRegistries re-reads the auto-detected auth sources and re-pings
+// every registry. Discovery and pings run off the UI thread; results land on
+// the UI thread via gui.g.Update and are dropped when a newer refresh has
+// since been issued (S-03).
+func (gui *Gui) refreshRegistries() {
+	if gui.Panels.Registries == nil || gui.g == nil {
+		return
+	}
+	gen := gui.registriesState.beginRefresh()
+
+	go func() {
+		sources, err := gui.registriesDiscover()
+		if err != nil {
+			// credentials.Discover errors are secret-free by construction.
+			// When no sources were returned, the panel keeps its current rows
+			// and the user can retry with 'r'.
+			gui.Log.Errorf("registries: discovering auth sources: %s", err)
+			if len(sources) == 0 {
+				return
+			}
+		}
+
+		items := make([]*registryItem, 0, len(sources))
+		for _, src := range sources {
+			items = append(items, &registryItem{
+				Kind:         registryKindRegistry,
+				Host:         src.Registry,
+				Username:     src.Username,
+				SourceFile:   src.Source,
+				AutoDetected: true,
+				Status:       registryItemStatusChecking,
+			})
+		}
+
+		gui.g.Update(func(*gocui.Gui) error {
+			gui.applyRegistriesRefresh(gen, items)
+			return nil
+		})
+
+		for _, item := range items {
+			go gui.pingRegistriesItem(gen, item)
+		}
+	}()
+}
+
+// applyRegistriesRefresh installs a freshly discovered item set, unless a
+// newer refresh has superseded this generation. Runs on the UI thread.
+func (gui *Gui) applyRegistriesRefresh(gen uint64, items []*registryItem) {
+	if !gui.registriesState.isCurrent(gen) {
+		return
+	}
+	gui.Panels.Registries.SetItems(items)
+	_ = gui.Panels.Registries.RerenderList()
+}
+
+// pingRegistriesItem resolves credentials for one registry — only now, and
+// only for that registry, because a credential helper can block on a keychain
+// prompt (D-09) — then builds a client and pings it. The result lands on the
+// UI thread and is dropped when a newer refresh has since been issued.
+func (gui *Gui) pingRegistriesItem(gen uint64, item *registryItem) {
+	ctx, cancel := context.WithTimeout(context.Background(), registriesPingTimeout)
+	defer cancel()
+
+	res, err := gui.registriesPing(ctx, item.Host)
+
+	gui.g.Update(func(*gocui.Gui) error {
+		gui.applyRegistriesPing(gen, item, res, err)
+		return nil
+	})
+}
+
+// applyRegistriesPing records one ping result on its row, unless a newer
+// refresh has superseded this generation (that refresh also installed fresh
+// item pointers, so an old pointer must never be written to). Runs on the UI
+// thread. Errors shown here are the registry/credentials packages' own,
+// already secret-free, messages.
+func (gui *Gui) applyRegistriesPing(gen uint64, item *registryItem, res registry.PingResult, err error) {
+	if !gui.registriesState.isCurrent(gen) {
+		return
+	}
+
+	item.Duration = res.Duration
+	item.Err = ""
+	if err != nil {
+		item.Err = err.Error()
+	}
+	if res.Status != "" {
+		item.Status = registryItemStatus(res.Status)
+	} else {
+		item.Status = registryItemStatusOffline
+	}
+
+	_ = gui.Panels.Registries.RerenderList()
+}
+
+// registriesDiscover returns the auto-detected registry auth sources,
+// delegating to the injectable hook so tests can count calls (D-09) and fake
+// results without touching ~/.docker.
+func (gui *Gui) registriesDiscover() ([]credentials.AuthSource, error) {
+	if fn := gui.registriesDiscoverFn; fn != nil {
+		return fn()
+	}
+	return credentials.Discover(credentials.DiscoverOptions{})
+}
+
+// registriesPing pings one registry host, delegating to the injectable hook
+// so tests can fake verdicts without any network.
+func (gui *Gui) registriesPing(ctx context.Context, host string) (registry.PingResult, error) {
+	if fn := gui.registriesPingFn; fn != nil {
+		return fn(ctx, host)
+	}
+	return pingRegistryWith(ctx, host, credentials.Resolve)
+}
+
+// pingHostForRegistry maps a canonical registry name to the host its /v2/
+// ping should hit. Docker Hub is the one special case: auth files key on the
+// canonical name docker.io, but the registry API lives on
+// registry-1.docker.io.
+func pingHostForRegistry(registryName string) string {
+	if credentials.NormalizeRegistry(registryName) == "docker.io" {
+		return "registry-1.docker.io"
+	}
+	return registryName
+}
+
+// pingRegistryWith is the real ping path, parameterised only by its resolve
+// function so tests can drive it against the in-process registrytest fixture
+// with a fake resolver instead of the real ~/.docker. Credential resolution
+// happens here, lazily and per registry (D-09): a resolution failure does not
+// skip the ping — the registry's own verdict matters more, and an
+// unauthorized verdict is reported alongside the resolution error, which is
+// the likelier cause. The secret travels from the resolver straight into the
+// client's redacting Credential; it is never logged, rendered, or stored.
+func pingRegistryWith(ctx context.Context, host string, resolve func(context.Context, string) (credentials.Secret, error)) (registry.PingResult, error) {
+	var cred *registry.Credential
+	var resolveErr error
+	if sec, err := resolve(ctx, host); err == nil {
+		cred = credentialFromSecret(sec)
+	} else if !errors.Is(err, credentials.ErrNotFound) {
+		resolveErr = err // secret-free by construction in pkg/registry/credentials
+	}
+
+	client, err := registry.NewClient(pingHostForRegistry(host), registry.Options{Credential: cred})
+	if err != nil {
+		return registry.PingResult{Status: registry.StatusOffline}, err
+	}
+
+	result, err := client.Ping(ctx)
+	if err != nil {
+		return result, err
+	}
+	if resolveErr != nil && result.Status == registry.StatusUnauthorized {
+		// anonymous ping rejected and resolution failed: the resolution
+		// error explains the unauthorized verdict better than the verdict
+		// alone; surface it on the row (the verdict is kept too).
+		return result, resolveErr
+	}
+	return result, nil
+}

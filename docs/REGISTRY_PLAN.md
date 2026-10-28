@@ -194,7 +194,7 @@ confirmation panel and never offered for auto-detected rows. L3.3 puts every use
 string through `pkg/i18n` and renders status strings and durations per the options line's
 conventions.
 
-- [ ] **L3.1 Registries panel.** `[medium | F-0001,F-0020,S-03,S-04 | after L1.1 L2.1]`
+- [x] **L3.1 Registries panel.** `[medium | F-0001,F-0020,S-03,S-04 | after L1.1 L2.1]`
 - [x] **L3.4 Masked prompt input.** `[light | S-04 | after L0.1]`
 - [ ] **L3.2 Connection CRUD flows.** ⚠️ `[heavy | F-0002,F-0003,F-0004,S-04 | after L3.1 L3.4 L2.2]`
 - [ ] **L3.3 Status rendering and i18n.** `[light | F-0001,F-0021,S-06 | after L3.1]`
@@ -316,4 +316,5 @@ Append at the top; take the next free `D-0NN` at commit time.
 | L2.2 | (see git log --grep '[L2.2]') | saved-connections store (`registries.yml`, mode 0600, no secrets on disk), Docker credential store integration (`secret_owner: lazydocker`), schema docs + L2.1 review follow-ups; review fixes: refuse clobbering pre-existing docker logins (`ErrExternalCredentialExists` / `Options.OverwriteExternal`) and match Docker's own store keys (`https://index.docker.io/v1/` for Hub, existing `auths`/`credHelpers` keys), by gemini |
 | L4.4 | (see git log --grep '[L4.4]') | opt-in multi-select in SideListPanel (toggle, range select, key persistence, title count, row markers, SelectedItems fallback), by gemini-3 |
 | L1.2 | (see git log --grep '[L1.2]') | pkg/registry catalog, tags, manifests (RFC5988 Link pagination, OCI + Docker v2 manifests and multi-arch indexes, digest verification, GetManifestByDigest) + registrytest catalog/tags/manifests fixture + L1.1 credential-scoping review fix (supervised rescue of glm's partial work), by gemini-2 |
+| L3.1 | (see git log --grep '[L3.1]') | Registries side panel (`SideListPanel[*registryItem]`), lazy first-focus discovery + async per-registry ping with generation counter, `registries.enabled` config, summary main tab, and i18n keys (rescued from glm-3), by gemini-3 |
 | L1.4 | (see git log --grep '[L1.4]') | pkg/registry/dockerhub client: login JWT + PAT auth, paginated repo/tag listing, PUBLIC/PRIVATE visibility, Validate, tag + repo delete, and origin/scheme/redirect guards (rescued from glm-2 + reviewed/hardened), by gemini |

@@ -493,7 +493,7 @@ func (gui *Gui) currentListPanel() (panels.ISideListPanel, bool) {
 }
 
 func (gui *Gui) allSidePanels() []panels.ISideListPanel {
-	return []panels.ISideListPanel{
+	sidePanels := []panels.ISideListPanel{
 		gui.Panels.Projects,
 		gui.Panels.Services,
 		gui.Panels.Containers,
@@ -501,6 +501,10 @@ func (gui *Gui) allSidePanels() []panels.ISideListPanel {
 		gui.Panels.Volumes,
 		gui.Panels.Networks,
 	}
+	if gui.Panels.Registries != nil {
+		sidePanels = append(sidePanels, gui.Panels.Registries)
+	}
+	return sidePanels
 }
 
 func (gui *Gui) allListPanels() []panels.ISideListPanel {

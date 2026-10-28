@@ -33,6 +33,7 @@ type Views struct {
 	Images     *gocui.View
 	Volumes    *gocui.View
 	Networks   *gocui.View
+	Registries *gocui.View
 
 	// main panel
 	Main *gocui.View
@@ -72,6 +73,7 @@ func (gui *Gui) orderedViewNameMappings() []viewNameMapping {
 		{viewPtr: &gui.Views.Images, name: "images", autoPosition: true},
 		{viewPtr: &gui.Views.Volumes, name: "volumes", autoPosition: true},
 		{viewPtr: &gui.Views.Networks, name: "networks", autoPosition: true},
+		{viewPtr: &gui.Views.Registries, name: "registries", autoPosition: true},
 
 		{viewPtr: &gui.Views.Main, name: "main", autoPosition: true},
 
@@ -151,6 +153,11 @@ func (gui *Gui) createAllViews() error {
 	gui.Views.Networks.Title = gui.Tr.NetworksTitle
 	gui.Views.Networks.TitlePrefix = "[6]"
 	gui.Views.Networks.SelBgColor = selectedLineBgColor
+
+	gui.Views.Registries.Highlight = true
+	gui.Views.Registries.Title = gui.Tr.RegistriesTitle
+	gui.Views.Registries.TitlePrefix = "[7]"
+	gui.Views.Registries.SelBgColor = selectedLineBgColor
 
 	gui.Views.Options.Frame = false
 	gui.Views.Options.FgColor = gui.GetOptionsPanelTextColor()

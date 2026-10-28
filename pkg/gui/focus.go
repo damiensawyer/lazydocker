@@ -52,6 +52,13 @@ func (gui *Gui) switchFocusAux(newView *gocui.View) error {
 
 	newViewStack := gui.State.ViewStack
 
+	// D-09: the registries panel's side effects (config read,
+	// credential-helper exec, network) start at first focus and never
+	// before. See onRegistriesPanelFocused.
+	if newView.Name() == "registries" {
+		gui.onRegistriesPanelFocused()
+	}
+
 	if gui.State.Filter.panel != nil && !lo.Contains(newViewStack, gui.State.Filter.panel.GetView().Name()) {
 		if err := gui.clearFilter(); err != nil {
 			return err

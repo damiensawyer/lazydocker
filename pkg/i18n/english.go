@@ -141,6 +141,23 @@ type TranslationSet struct {
 	FocusImages     string
 	FocusVolumes    string
 	FocusNetworks   string
+
+	// L3.1 — Registries side panel
+	RegistriesTitle               string
+	NoRegistries                  string
+	FocusRegistries               string
+	RefreshRegistries             string
+	RegistriesSummaryTitle        string
+	RegistriesSummaryRegistry     string
+	RegistriesSummaryUsername     string
+	RegistriesSummarySourceFile   string
+	RegistriesSummaryStatus       string
+	RegistriesSummaryResponseTime string
+	RegistriesAutoDetectedSuffix  string
+	RegistriesStatusChecking      string
+	RegistriesStatusOnline        string
+	RegistriesStatusOffline       string
+	RegistriesStatusUnauthorized  string
 }
 
 func englishSet() TranslationSet {
@@ -289,5 +306,22 @@ func englishSet() TranslationSet {
 		FocusImages:     "focus images panel",
 		FocusVolumes:    "focus volumes panel",
 		FocusNetworks:   "focus networks panel",
+
+		// L3.1 — Registries side panel
+		RegistriesTitle:               "Registries",
+		NoRegistries:                  "No registries",
+		FocusRegistries:               "focus registries panel",
+		RefreshRegistries:             "refresh registries",
+		RegistriesSummaryTitle:        "Summary",
+		RegistriesSummaryRegistry:     "Registry:",
+		RegistriesSummaryUsername:     "Username:",
+		RegistriesSummarySourceFile:   "Source file:",
+		RegistriesSummaryStatus:       "Status:",
+		RegistriesSummaryResponseTime: "Response time:",
+		RegistriesAutoDetectedSuffix:  "(auto)",
+		RegistriesStatusChecking:      "checking",
+		RegistriesStatusOnline:        "online",
+		RegistriesStatusOffline:       "offline",
+		RegistriesStatusUnauthorized:  "unauthorized",
 	}
 }
