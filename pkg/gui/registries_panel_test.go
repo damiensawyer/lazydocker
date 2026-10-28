@@ -20,6 +20,8 @@ import (
 	"github.com/jesseduffield/lazydocker/pkg/registry"
 	"github.com/jesseduffield/lazydocker/pkg/registry/connections"
 	"github.com/jesseduffield/lazydocker/pkg/registry/credentials"
+	"github.com/jesseduffield/lazydocker/pkg/registry/dockerhub"
+	"github.com/jesseduffield/lazydocker/pkg/registry/ghcr"
 	"github.com/jesseduffield/lazydocker/pkg/registry/registrytest"
 	"github.com/jesseduffield/lazydocker/pkg/tasks"
 	"github.com/samber/lo"
@@ -77,9 +79,14 @@ func newHeadlessRegistriesTestGui(t *testing.T) *Gui {
 			Menu:         newView("menu"),
 			Options:      newView("options"),
 			Confirmation: newView("confirmation"),
+			Filter:       newView("filter"),
 		},
 	}
 	gui.setPanels()
+	gui.Views.Registries.Title = gui.Tr.RegistriesTitle
+	gui.registriesState.updateUIFn = func(f func(*gocui.Gui) error) {
+		_ = f(gui.g)
+	}
 	return gui
 }
 
@@ -1017,4 +1024,485 @@ func TestRegistryCRUDNeverLogsSecret(t *testing.T) {
 		t.Fatal("secret leaked into registries.yml")
 	}
 	_ = store
+}
+
+type fakeRepoSource struct {
+	fn func(ctx context.Context, item *registryItem) ([]registryRepository, error)
+}
+
+func (f *fakeRepoSource) ListRepositories(ctx context.Context, item *registryItem) ([]registryRepository, error) {
+	if f.fn != nil {
+		return f.fn(ctx, item)
+	}
+	return nil, nil
+}
+
+// L4.1: Enter on a registry drills into repositories, updating the panel title
+// with the breadcrumb path ("Registries › <host>"). Esc on the drilled level
+// pops back, restoring the previous list and cursor position.
+func TestRegistriesDrillPushPopRestoresListAndCursor(t *testing.T) {
+	gui := newHeadlessRegistriesTestGui(t)
+	if err := gui.switchFocus(gui.Views.Registries); err != nil {
+		t.Fatalf("switchFocus: %s", err)
+	}
+
+	items := []*registryItem{
+		{Kind: registryKindRegistry, Host: "docker.io", Username: "user1", Status: registryItemStatusOnline},
+		{Kind: registryKindRegistry, Host: "ghcr.io", Username: "user2", Status: registryItemStatusOnline},
+		{Kind: registryKindRegistry, Host: "quay.io", Username: "user3", Status: registryItemStatusOnline},
+	}
+	gui.Panels.Registries.SetItems(items)
+	gui.Panels.Registries.SetSelectedLineIdx(1) // Select ghcr.io
+	_ = gui.Panels.Registries.HandleSelect()
+
+	if gui.Views.Registries.Title != gui.Tr.RegistriesTitle {
+		t.Fatalf("Title = %q; want %q", gui.Views.Registries.Title, gui.Tr.RegistriesTitle)
+	}
+	if gui.Panels.Registries.SelectedIdx != 1 {
+		t.Fatalf("SelectedIdx = %d; want 1", gui.Panels.Registries.SelectedIdx)
+	}
+
+	gui.registriesState.repoSource = &fakeRepoSource{
+		fn: func(ctx context.Context, item *registryItem) ([]registryRepository, error) {
+			if item.Host != "ghcr.io" {
+				t.Fatalf("unexpected host %q", item.Host)
+			}
+			return []registryRepository{
+				{Name: "octocat/hello-world", Visibility: "PUBLIC"},
+				{Name: "octocat/private-pkg", Visibility: "PRIVATE"},
+			}, nil
+		},
+	}
+
+	// Press Enter to drill into ghcr.io
+	if err := gui.handleRegistriesEnter(gui.g, gui.Views.Registries); err != nil {
+		t.Fatalf("handleRegistriesEnter: %s", err)
+	}
+
+	// Wait for repositories to be loaded and applied
+	waitUntil(t, 2*time.Second, func() bool {
+		return gui.Panels.Registries.List.Len() == 2
+	}, "repositories not loaded")
+
+	if !gui.isRegistriesDrilledDown() {
+		t.Fatal("isRegistriesDrilledDown() = false; want true")
+	}
+	wantTitle := "Registries › ghcr.io"
+	if gui.Views.Registries.Title != wantTitle {
+		t.Fatalf("Title = %q; want %q", gui.Views.Registries.Title, wantTitle)
+	}
+
+	repo1, err := gui.Panels.Registries.GetSelectedItem()
+	if err != nil || repo1.Repository != "octocat/hello-world" {
+		t.Fatalf("GetSelectedItem() = %+v, %v; want octocat/hello-world", repo1, err)
+	}
+	if repo1.Visibility != "PUBLIC" {
+		t.Fatalf("Visibility = %q; want PUBLIC", repo1.Visibility)
+	}
+
+	// Verify main view summary contains registry, repository, and visibility
+	summary := gui.registriesSummaryStr(repo1)
+	if !strings.Contains(summary, "ghcr.io") || !strings.Contains(summary, "octocat/hello-world") || !strings.Contains(summary, "PUBLIC") {
+		t.Fatalf("summary = %q; missing expected fields", summary)
+	}
+
+	// Move cursor to index 1 (octocat/private-pkg)
+	gui.Panels.Registries.SetSelectedLineIdx(1)
+	_ = gui.Panels.Registries.HandleSelect()
+	repo2, err := gui.Panels.Registries.GetSelectedItem()
+	if err != nil || repo2.Repository != "octocat/private-pkg" {
+		t.Fatalf("GetSelectedItem() = %+v, %v; want octocat/private-pkg", repo2, err)
+	}
+
+	// Press Esc to pop back
+	if err := gui.handleRegistriesEscape(gui.g, gui.Views.Registries); err != nil {
+		t.Fatalf("handleRegistriesEscape: %s", err)
+	}
+
+	if gui.isRegistriesDrilledDown() {
+		t.Fatal("isRegistriesDrilledDown() = true; want false after pop")
+	}
+	if gui.Views.Registries.Title != gui.Tr.RegistriesTitle {
+		t.Fatalf("Title = %q; want %q", gui.Views.Registries.Title, gui.Tr.RegistriesTitle)
+	}
+	if got := gui.Panels.Registries.List.Len(); got != 3 {
+		t.Fatalf("List.Len() = %d; want 3", got)
+	}
+	if gui.Panels.Registries.SelectedIdx != 1 {
+		t.Fatalf("SelectedIdx = %d; want 1 (restored)", gui.Panels.Registries.SelectedIdx)
+	}
+	selectedItem, err := gui.Panels.Registries.GetSelectedItem()
+	if err != nil || selectedItem.Host != "ghcr.io" {
+		t.Fatalf("GetSelectedItem() = %+v, %v; want ghcr.io", selectedItem, err)
+	}
+}
+
+// L4.1: A background load that lands after the user has left the level
+// (e.g. popped back or navigated away) must be dropped and never clobber
+// the current list.
+func TestRegistriesDrillDropsStaleResultsForLeftLevel(t *testing.T) {
+	gui := newHeadlessRegistriesTestGui(t)
+	if err := gui.switchFocus(gui.Views.Registries); err != nil {
+		t.Fatalf("switchFocus: %s", err)
+	}
+
+	items := []*registryItem{
+		{Kind: registryKindRegistry, Host: "docker.io", Username: "user1", Status: registryItemStatusOnline},
+		{Kind: registryKindRegistry, Host: "ghcr.io", Username: "user2", Status: registryItemStatusOnline},
+	}
+	gui.Panels.Registries.SetItems(items)
+
+	// Block the fake repo source
+	blockCh := make(chan struct{})
+	gui.registriesState.repoSource = &fakeRepoSource{
+		fn: func(ctx context.Context, item *registryItem) ([]registryRepository, error) {
+			<-blockCh
+			return []registryRepository{
+				{Name: "stale-repo", Visibility: "PUBLIC"},
+			}, nil
+		},
+	}
+
+	// Drill into docker.io (index 0)
+	if err := gui.handleRegistriesEnter(gui.g, gui.Views.Registries); err != nil {
+		t.Fatalf("handleRegistriesEnter: %s", err)
+	}
+
+	if !gui.isRegistriesDrilledDown() {
+		t.Fatal("expected drilled down")
+	}
+
+	// User pops back to root level before background load finishes
+	if err := gui.handleRegistriesEscape(gui.g, gui.Views.Registries); err != nil {
+		t.Fatalf("handleRegistriesEscape: %s", err)
+	}
+	if gui.isRegistriesDrilledDown() {
+		t.Fatal("expected not drilled down after Esc")
+	}
+
+	// Now unblock the background load
+	close(blockCh)
+	// Give any goroutine a chance to land
+	time.Sleep(50 * time.Millisecond)
+
+	// Panel items must STILL be the registries list, NOT the stale repositories!
+	if got := gui.Panels.Registries.List.Len(); got != 2 {
+		t.Fatalf("List.Len() = %d; want 2 (stale results must be dropped)", got)
+	}
+	item0, _ := gui.Panels.Registries.List.TryGet(0)
+	if item0.Kind != registryKindRegistry || item0.Host != "docker.io" {
+		t.Fatalf("item 0 = %+v; want registry docker.io", item0)
+	}
+}
+
+// L4.1: If a filter is active at a drilled level, pressing Esc must clear the
+// filter first; only a second Esc pops the drill level.
+func TestRegistriesDrillEscWithFilterClearsFilterFirst(t *testing.T) {
+	gui := newHeadlessRegistriesTestGui(t)
+	if err := gui.switchFocus(gui.Views.Registries); err != nil {
+		t.Fatalf("switchFocus: %s", err)
+	}
+
+	gui.Panels.Registries.SetItems([]*registryItem{
+		{Kind: registryKindRegistry, Host: "ghcr.io", Username: "user", Status: registryItemStatusOnline},
+	})
+	gui.registriesState.repoSource = &fakeRepoSource{
+		fn: func(ctx context.Context, item *registryItem) ([]registryRepository, error) {
+			return []registryRepository{
+				{Name: "myorg/api-server", Visibility: "PUBLIC"},
+				{Name: "myorg/worker", Visibility: "PRIVATE"},
+				{Name: "other/docs", Visibility: "PUBLIC"},
+			}, nil
+		},
+	}
+
+	// Enter ghcr.io
+	if err := gui.handleRegistriesEnter(gui.g, gui.Views.Registries); err != nil {
+		t.Fatalf("handleRegistriesEnter: %s", err)
+	}
+	waitUntil(t, 2*time.Second, func() bool {
+		return gui.Panels.Registries.List.Len() == 3
+	}, "repositories not loaded")
+
+	// Activate lazydocker's filter on the panel
+	gui.State.Filter.active = true
+	gui.State.Filter.needle = "worker"
+	gui.State.Filter.panel = gui.Panels.Registries
+	gui.Panels.Registries.FilterAndSort()
+
+	if !gui.State.Filter.active {
+		t.Fatal("filter should be active")
+	}
+	if got := gui.Panels.Registries.List.Len(); got != 1 {
+		t.Fatalf("filtered list len = %d; want 1", got)
+	}
+
+	// First Esc: must clear the filter and NOT pop the level
+	if err := gui.handleRegistriesEscape(gui.g, gui.Views.Registries); err != nil {
+		t.Fatalf("first handleRegistriesEscape: %s", err)
+	}
+
+	if gui.State.Filter.active {
+		t.Fatal("filter should be inactive after first Esc")
+	}
+	if !gui.isRegistriesDrilledDown() {
+		t.Fatal("isRegistriesDrilledDown() = false; first Esc must only clear the filter, not pop")
+	}
+	if got := gui.Panels.Registries.List.Len(); got != 3 {
+		t.Fatalf("unfiltered list len = %d; want 3", got)
+	}
+	if gui.Views.Registries.Title != "Registries › ghcr.io" {
+		t.Fatalf("Title = %q; want Registries › ghcr.io", gui.Views.Registries.Title)
+	}
+
+	// Second Esc: now that filter is inactive, it must pop back to registries
+	if err := gui.handleRegistriesEscape(gui.g, gui.Views.Registries); err != nil {
+		t.Fatalf("second handleRegistriesEscape: %s", err)
+	}
+
+	if gui.isRegistriesDrilledDown() {
+		t.Fatal("isRegistriesDrilledDown() = true; second Esc must pop the level")
+	}
+	if gui.Views.Registries.Title != gui.Tr.RegistriesTitle {
+		t.Fatalf("Title = %q; want %q", gui.Views.Registries.Title, gui.Tr.RegistriesTitle)
+	}
+	if got := gui.Panels.Registries.List.Len(); got != 1 {
+		t.Fatalf("restored list len = %d; want 1", got)
+	}
+}
+
+// L4.1: Repository source selection per registry kind:
+//   - generic registry -> calls listGeneric
+//   - docker.io -> calls listDockerHub with namespace = username (or anonymous if none)
+//   - ghcr.io -> calls listGHCR with owner = username
+func TestRegistriesSourceSelectionPerKind(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("generic registry", func(t *testing.T) {
+		var calledGeneric bool
+		src := &defaultRepositorySource{
+			resolveCredential: func(ctx context.Context, item *registryItem) (*registry.Credential, error) {
+				return &registry.Credential{Username: "u", Password: "p"}, nil
+			},
+			listGeneric: func(ctx context.Context, host string, opts registry.Options) ([]registryRepository, error) {
+				calledGeneric = true
+				if host != "registry.example.com" {
+					t.Fatalf("host = %q; want registry.example.com", host)
+				}
+				if opts.Credential == nil || opts.Credential.Username != "u" {
+					t.Fatalf("opts.Credential = %+v; want username u", opts.Credential)
+				}
+				return []registryRepository{{Name: "repo1", Visibility: ""}}, nil
+			},
+		}
+
+		item := &registryItem{
+			Kind: registryKindRegistry,
+			Host: "registry.example.com",
+		}
+		repos, err := src.ListRepositories(ctx, item)
+		if err != nil {
+			t.Fatalf("ListRepositories: %s", err)
+		}
+		if !calledGeneric {
+			t.Fatal("listGeneric was not called")
+		}
+		if len(repos) != 1 || repos[0].Name != "repo1" || repos[0].Visibility != "" {
+			t.Fatalf("unexpected repos: %+v", repos)
+		}
+	})
+
+	t.Run("docker.io with username", func(t *testing.T) {
+		var calledHub bool
+		src := &defaultRepositorySource{
+			resolveCredential: func(ctx context.Context, item *registryItem) (*registry.Credential, error) {
+				return &registry.Credential{Username: "myuser", Password: "pw"}, nil
+			},
+			listDockerHub: func(ctx context.Context, opts dockerhub.Options, namespace string) ([]registryRepository, error) {
+				calledHub = true
+				if namespace != "myuser" {
+					t.Fatalf("namespace = %q; want myuser", namespace)
+				}
+				if opts.Credential == nil || opts.Credential.Password != "pw" {
+					t.Fatalf("opts.Credential = %+v; want pw", opts.Credential)
+				}
+				return []registryRepository{{Name: "hub-repo", Visibility: "PUBLIC"}}, nil
+			},
+		}
+
+		item := &registryItem{
+			Kind:     registryKindRegistry,
+			Host:     "docker.io",
+			Username: "myuser",
+		}
+		repos, err := src.ListRepositories(ctx, item)
+		if err != nil {
+			t.Fatalf("ListRepositories: %s", err)
+		}
+		if !calledHub {
+			t.Fatal("listDockerHub was not called")
+		}
+		if len(repos) != 1 || repos[0].Name != "hub-repo" || repos[0].Visibility != "PUBLIC" {
+			t.Fatalf("unexpected repos: %+v", repos)
+		}
+	})
+
+	t.Run("docker.io anonymous without username falls back to library", func(t *testing.T) {
+		var calledHub bool
+		src := &defaultRepositorySource{
+			resolveCredential: func(ctx context.Context, item *registryItem) (*registry.Credential, error) {
+				return nil, nil // anonymous
+			},
+			listDockerHub: func(ctx context.Context, opts dockerhub.Options, namespace string) ([]registryRepository, error) {
+				calledHub = true
+				if namespace != "library" {
+					t.Fatalf("namespace = %q; want library for anonymous hub", namespace)
+				}
+				if opts.Credential != nil {
+					t.Fatalf("opts.Credential = %+v; want nil for anonymous", opts.Credential)
+				}
+				return []registryRepository{{Name: "ubuntu", Visibility: "PUBLIC"}}, nil
+			},
+		}
+
+		item := &registryItem{
+			Kind: registryKindRegistry,
+			Host: "docker.io",
+		}
+		repos, err := src.ListRepositories(ctx, item)
+		if err != nil {
+			t.Fatalf("ListRepositories: %s", err)
+		}
+		if !calledHub {
+			t.Fatal("listDockerHub was not called")
+		}
+		if len(repos) != 1 || repos[0].Name != "ubuntu" {
+			t.Fatalf("unexpected repos: %+v", repos)
+		}
+	})
+
+	t.Run("ghcr.io with owner", func(t *testing.T) {
+		var calledGHCR bool
+		src := &defaultRepositorySource{
+			resolveCredential: func(ctx context.Context, item *registryItem) (*registry.Credential, error) {
+				return &registry.Credential{Username: "myorg", Password: "ghp_secret"}, nil
+			},
+			listGHCR: func(ctx context.Context, opts ghcr.Options, owner string) ([]registryRepository, error) {
+				calledGHCR = true
+				if owner != "myorg" {
+					t.Fatalf("owner = %q; want myorg", owner)
+				}
+				if opts.Credential == nil || opts.Credential.Password != "ghp_secret" {
+					t.Fatalf("opts.Credential = %+v; want secret", opts.Credential)
+				}
+				return []registryRepository{{Name: "myorg/pkg", Visibility: "PRIVATE"}}, nil
+			},
+		}
+
+		item := &registryItem{
+			Kind:     registryKindRegistry,
+			Host:     "ghcr.io",
+			Username: "myorg",
+		}
+		repos, err := src.ListRepositories(ctx, item)
+		if err != nil {
+			t.Fatalf("ListRepositories: %s", err)
+		}
+		if !calledGHCR {
+			t.Fatal("listGHCR was not called")
+		}
+		if len(repos) != 1 || repos[0].Name != "myorg/pkg" || repos[0].Visibility != "PRIVATE" {
+			t.Fatalf("unexpected repos: %+v", repos)
+		}
+	})
+}
+
+// L4.1: The n/e/d connection keys only act at the registry level; at the repository level
+// they are inert (do nothing).
+func TestRegistriesConnectionCRUDInertAtRepositoryLevel(t *testing.T) {
+	gui := newHeadlessRegistriesTestGui(t)
+	if err := gui.switchFocus(gui.Views.Registries); err != nil {
+		t.Fatalf("switchFocus: %s", err)
+	}
+
+	gui.Panels.Registries.SetItems([]*registryItem{
+		{Kind: registryKindRegistry, Host: "docker.io", Username: "user", Status: registryItemStatusOnline},
+	})
+	gui.registriesState.repoSource = &fakeRepoSource{
+		fn: func(ctx context.Context, item *registryItem) ([]registryRepository, error) {
+			return []registryRepository{
+				{Name: "myuser/repo", Visibility: "PUBLIC"},
+			}, nil
+		},
+	}
+
+	// Drill into docker.io
+	if err := gui.handleRegistriesEnter(gui.g, gui.Views.Registries); err != nil {
+		t.Fatalf("handleRegistriesEnter: %s", err)
+	}
+	waitUntil(t, 2*time.Second, func() bool {
+		return gui.Panels.Registries.List.Len() == 1
+	}, "repositories not loaded")
+
+	if !gui.isRegistriesDrilledDown() {
+		t.Fatal("expected drilled down")
+	}
+
+	// 1. 'n' (Add) must be inert
+	if err := gui.handleAddRegistryConnection(gui.g, gui.Views.Registries); err != nil {
+		t.Fatalf("handleAddRegistryConnection: %s", err)
+	}
+	if gui.Panels.Menu.List.Len() > 0 {
+		t.Fatalf("menu opened for Add at repository level: Len=%d", gui.Panels.Menu.List.Len())
+	}
+
+	// 2. 'e' (Edit) must be inert
+	if err := gui.handleEditRegistryConnection(gui.g, gui.Views.Registries); err != nil {
+		t.Fatalf("handleEditRegistryConnection: %s", err)
+	}
+	if gui.Views.Confirmation.Title != "" {
+		t.Fatalf("confirmation view opened for Edit at repository level: %q", gui.Views.Confirmation.Title)
+	}
+
+	// 3. 'd' (Delete) must be inert
+	if err := gui.handleDeleteRegistryConnection(gui.g, gui.Views.Registries); err != nil {
+		t.Fatalf("handleDeleteRegistryConnection: %s", err)
+	}
+	if gui.Views.Confirmation.Title != "" {
+		t.Fatalf("confirmation view opened for Delete at repository level: %q", gui.Views.Confirmation.Title)
+	}
+}
+
+// L4.1: Errors from listing render in the main view for that level (secret-free messages).
+func TestRegistriesDrillListingErrorRendersInMainView(t *testing.T) {
+	gui := newHeadlessRegistriesTestGui(t)
+	if err := gui.switchFocus(gui.Views.Registries); err != nil {
+		t.Fatalf("switchFocus: %s", err)
+	}
+
+	gui.Panels.Registries.SetItems([]*registryItem{
+		{Kind: registryKindRegistry, Host: "ghcr.io", Username: "user", Status: registryItemStatusOnline},
+	})
+	gui.registriesState.repoSource = &fakeRepoSource{
+		fn: func(ctx context.Context, item *registryItem) ([]registryRepository, error) {
+			return nil, errors.New("ghcr: unauthorized to list packages")
+		},
+	}
+
+	if err := gui.handleRegistriesEnter(gui.g, gui.Views.Registries); err != nil {
+		t.Fatalf("handleRegistriesEnter: %s", err)
+	}
+
+	waitUntil(t, 2*time.Second, func() bool {
+		level := gui.registriesState.currentDrillLevel()
+		return level != nil && level.err != ""
+	}, "error not recorded on level")
+
+	level := gui.registriesState.currentDrillLevel()
+	if level.err != "ghcr: unauthorized to list packages" {
+		t.Fatalf("level.err = %q; want unauthorized error", level.err)
+	}
+	if gui.Panels.Registries.NoItemsMessage != "ghcr: unauthorized to list packages" {
+		t.Fatalf("NoItemsMessage = %q; want unauthorized error", gui.Panels.Registries.NoItemsMessage)
+	}
 }

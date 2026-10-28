@@ -83,6 +83,10 @@ type registryItem struct {
 	// Err, when set, is a secret-free error message from the registry or
 	// credentials packages (both already sanitize), shown in the summary.
 	Err string
+
+	// Repository-kind fields (L4.1).
+	Repository string
+	Visibility string
 }
 
 // credentialFromSecret maps a resolved credentials.Secret onto the registry

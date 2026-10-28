@@ -475,6 +475,13 @@ func (gui *Gui) GetInitialKeybindings() []*Binding {
 			Description: gui.Tr.DeleteRegistryConnection,
 		},
 		{
+			ViewName:    "registries",
+			Key:         gocui.KeyEsc,
+			Modifier:    gocui.ModNone,
+			Handler:     gui.handleRegistriesEscape,
+			Description: gui.Tr.Return,
+		},
+		{
 			ViewName:    "main",
 			Key:         gocui.KeyEsc,
 			Modifier:    gocui.ModNone,
@@ -632,12 +639,16 @@ func (gui *Gui) GetInitialKeybindings() []*Binding {
 	setUpDownClickBindings("main", gui.scrollUpMain, gui.scrollDownMain, gui.handleMainClick)
 
 	for _, panel := range gui.allSidePanels() {
+		enterHandler := gui.handleEnterMain
+		if panel.GetView().Name() == "registries" {
+			enterHandler = gui.handleRegistriesEnter
+		}
 		bindings = append(bindings,
 			&Binding{
 				ViewName:    panel.GetView().Name(),
 				Key:         gocui.KeyEnter,
 				Modifier:    gocui.ModNone,
-				Handler:     gui.handleEnterMain,
+				Handler:     enterHandler,
 				Description: gui.Tr.FocusMain,
 			},
 			&Binding{

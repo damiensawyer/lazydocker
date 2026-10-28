@@ -28,6 +28,20 @@ import (
 // prompt; the row must not stay "checking" forever).
 const registriesPingTimeout = 20 * time.Second
 
+// registriesDrillLevel captures one level of the registries drill stack (D-08).
+// When at the root (registries level), drillStack is empty. When drilled into
+// a registry, drillStack has one level storing the parent registry item,
+// the path title, the previous items and cursor position, and any error from
+// listing repositories.
+type registriesDrillLevel struct {
+	kind        registryItemKind
+	title       string
+	item        *registryItem
+	items       []*registryItem
+	selectedIdx int
+	err         string
+}
+
 // registriesState is the mutable state behind the Registries panel's async
 // refresh (S-03): a generation counter that invalidates in-flight work.
 type registriesState struct {
@@ -44,6 +58,38 @@ type registriesState struct {
 	// storeLoadFn, when set, overrides reading saved connections in tests
 	// (e.g. to verify D-09 lazy store reads).
 	storeLoadFn func() ([]connections.Connection, error)
+	// drillStack holds the breadcrumb trail when drilled down into a registry.
+	drillStack []*registriesDrillLevel
+	// repoSource overrides the default repository source in tests.
+	repoSource repositorySource
+	// updateUIFn overrides gui.g.Update in tests (e.g. headless tests without an event loop).
+	updateUIFn func(func(*gocui.Gui) error)
+}
+
+func (s *registriesState) currentDrillLevel() *registriesDrillLevel {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.drillStack) == 0 {
+		return nil
+	}
+	return s.drillStack[len(s.drillStack)-1]
+}
+
+func (s *registriesState) isDrilledDown() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.drillStack) > 0
+}
+
+func (s *registriesState) bumpGeneration() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.generation++
+	return s.generation
+}
+
+func (gui *Gui) isRegistriesDrilledDown() bool {
+	return gui.registriesState.isDrilledDown()
 }
 
 // beginRefresh marks the panel loaded and opens a new generation. Synchronous
@@ -79,6 +125,9 @@ func (gui *Gui) getRegistriesPanel() *panels.SideListPanel[*registryItem] {
 			// re-renders the summary of the selected row (the periodic
 			// checkForContextChange calls HandleSelect every second).
 			GetItemContextCacheKey: func(item *registryItem) string {
+				if item.Kind == registryKindRepository {
+					return "repo-" + item.Host + "-" + item.Repository + "-" + item.Visibility + "-" + item.Err
+				}
 				return "registries-" + item.Host + "-" + item.Username + "-" + string(item.Status) + "-" + item.Duration.String() + "-" + item.Err
 			},
 		},
@@ -89,10 +138,16 @@ func (gui *Gui) getRegistriesPanel() *panels.SideListPanel[*registryItem] {
 		NoItemsMessage: gui.Tr.NoRegistries,
 		Gui:            gui.intoInterface(),
 		Sort: func(a, b *registryItem) bool {
+			if a.Kind == registryKindRepository && b.Kind == registryKindRepository {
+				return a.Repository < b.Repository
+			}
 			return a.Host < b.Host
 		},
 		GetTableCells: gui.getRegistriesDisplayStrings,
 		GetItemKey: func(item *registryItem) string {
+			if item.Kind == registryKindRepository {
+				return item.Host + "/" + item.Repository
+			}
 			return item.Host
 		},
 		// `registries: { enabled: false }` hides the panel entirely (zero
@@ -115,6 +170,12 @@ func (gui *Gui) renderRegistrySummary(item *registryItem) tasks.TaskFunc {
 // duration, and the registry/credentials packages' own (already sanitized)
 // error messages. A secret is never held here, let alone rendered.
 func (gui *Gui) registriesSummaryStr(item *registryItem) string {
+	if item == nil {
+		return ""
+	}
+	if item.Kind == registryKindRepository {
+		return gui.repositorySummaryStr(item)
+	}
 	padding := 15
 	output := ""
 	output += utils.WithPadding(gui.Tr.RegistriesSummaryRegistry, padding) + gui.registriesHostDisplay(item) + "\n"
@@ -130,7 +191,32 @@ func (gui *Gui) registriesSummaryStr(item *registryItem) string {
 	return output
 }
 
+func (gui *Gui) repositorySummaryStr(item *registryItem) string {
+	padding := 15
+	output := ""
+	output += utils.WithPadding(gui.Tr.RegistriesSummaryRegistry, padding) + item.Host + "\n"
+	output += utils.WithPadding(gui.Tr.RegistriesSummaryRepository, padding) + item.Repository + "\n"
+	if item.Visibility != "" {
+		output += utils.WithPadding(gui.Tr.RegistriesSummaryVisibility, padding) + item.Visibility + "\n"
+	}
+	if item.Err != "" {
+		output += "\n" + item.Err + "\n"
+	}
+	return output
+}
+
 func (gui *Gui) getRegistriesDisplayStrings(item *registryItem) []string {
+	if item.Kind == registryKindRepository {
+		if item.Visibility != "" {
+			return []string{
+				item.Repository,
+				item.Visibility,
+			}
+		}
+		return []string{
+			item.Repository,
+		}
+	}
 	return []string{
 		gui.registriesStatusDisplay(item.Status),
 		gui.registriesHostDisplay(item),
@@ -188,11 +274,192 @@ func (gui *Gui) onRegistriesPanelFocused() {
 }
 
 // handleRegistriesRefresh is the panel's refresh keybinding ('r'): re-discover
-// auth sources and re-ping every registry, dropping any in-flight results
-// from the previous round.
+// auth sources and re-ping every registry, or reload repositories if drilled down,
+// dropping any in-flight results from the previous round.
 func (gui *Gui) handleRegistriesRefresh(g *gocui.Gui, v *gocui.View) error {
+	if gui.isRegistriesDrilledDown() {
+		level := gui.registriesState.currentDrillLevel()
+		if level != nil && level.item != nil {
+			gen := gui.registriesState.bumpGeneration()
+			gui.Panels.Registries.NoItemsMessage = gui.Tr.NoRepositories
+			gui.Panels.Registries.SetItems([]*registryItem{})
+			_ = gui.Panels.Registries.RerenderList()
+			gui.loadRepositories(gen, level.item)
+			return nil
+		}
+	}
 	gui.refreshRegistries()
 	return nil
+}
+
+func (gui *Gui) handleRegistriesEnter(g *gocui.Gui, v *gocui.View) error {
+	if gui.Panels.Registries == nil {
+		return nil
+	}
+	item, err := gui.Panels.Registries.GetSelectedItem()
+	if err != nil || item == nil {
+		return nil
+	}
+
+	if item.Kind == registryKindRegistry {
+		return gui.drillIntoRegistry(item)
+	}
+
+	return gui.handleEnterMain(g, v)
+}
+
+func (gui *Gui) drillIntoRegistry(item *registryItem) error {
+	if gui.State.Filter.active {
+		_ = gui.clearFilter()
+	}
+
+	prevItems := gui.Panels.Registries.List.GetAllItems()
+	prevSelectedIdx := gui.Panels.Registries.SelectedIdx
+
+	gui.registriesState.mu.Lock()
+	gui.registriesState.generation++
+	gen := gui.registriesState.generation
+	level := &registriesDrillLevel{
+		kind:        registryKindRepository,
+		title:       gui.Tr.RegistriesTitle + " › " + item.Host,
+		item:        item,
+		items:       prevItems,
+		selectedIdx: prevSelectedIdx,
+	}
+	gui.registriesState.drillStack = append(gui.registriesState.drillStack, level)
+	gui.registriesState.mu.Unlock()
+
+	if gui.Views.Registries != nil {
+		gui.Views.Registries.Title = level.title
+	}
+	gui.Panels.Registries.NoItemsMessage = gui.Tr.NoRepositories
+	gui.Panels.Registries.SetItems([]*registryItem{})
+	_ = gui.Panels.Registries.RerenderList()
+
+	gui.loadRepositories(gen, item)
+	return nil
+}
+
+func (gui *Gui) handleRegistriesEscape(g *gocui.Gui, v *gocui.View) error {
+	if gui.State.Filter.active {
+		return gui.clearFilter()
+	}
+	if gui.isRegistriesDrilledDown() {
+		return gui.popRegistriesDrill()
+	}
+	return nil
+}
+
+func (gui *Gui) popRegistriesDrill() error {
+	gui.registriesState.mu.Lock()
+	n := len(gui.registriesState.drillStack)
+	if n == 0 {
+		gui.registriesState.mu.Unlock()
+		return nil
+	}
+	popped := gui.registriesState.drillStack[n-1]
+	gui.registriesState.drillStack = gui.registriesState.drillStack[:n-1]
+	gui.registriesState.generation++
+	remaining := len(gui.registriesState.drillStack)
+	var parentLevel *registriesDrillLevel
+	if remaining > 0 {
+		parentLevel = gui.registriesState.drillStack[remaining-1]
+	}
+	gui.registriesState.mu.Unlock()
+
+	if remaining == 0 {
+		if gui.Views.Registries != nil {
+			gui.Views.Registries.Title = gui.Tr.RegistriesTitle
+		}
+		gui.Panels.Registries.NoItemsMessage = gui.Tr.NoRegistries
+	} else {
+		if gui.Views.Registries != nil {
+			gui.Views.Registries.Title = parentLevel.title
+		}
+		gui.Panels.Registries.NoItemsMessage = gui.Tr.NoRepositories
+	}
+
+	gui.Panels.Registries.SetItems(popped.items)
+	gui.Panels.Registries.SetSelectedLineIdx(popped.selectedIdx)
+	if gui.IsCurrentView(gui.Views.Registries) {
+		_ = gui.Panels.Registries.HandleSelect()
+	}
+	_ = gui.Panels.Registries.RerenderList()
+	return nil
+}
+
+func (gui *Gui) updateUI(f func(*gocui.Gui) error) {
+	gui.registriesState.mu.Lock()
+	fn := gui.registriesState.updateUIFn
+	gui.registriesState.mu.Unlock()
+
+	if fn != nil {
+		fn(f)
+		return
+	}
+	if gui.g == nil {
+		_ = f(nil)
+		return
+	}
+	gui.g.Update(f)
+}
+
+func (gui *Gui) loadRepositories(gen uint64, item *registryItem) {
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		source := gui.getRepositorySource()
+		repos, err := source.ListRepositories(ctx, item)
+
+		gui.updateUI(func(*gocui.Gui) error {
+			gui.applyRepositories(gen, item, repos, err)
+			return nil
+		})
+	}()
+}
+
+func (gui *Gui) applyRepositories(gen uint64, parentItem *registryItem, repos []registryRepository, err error) {
+	if !gui.registriesState.isCurrent(gen) {
+		return
+	}
+	level := gui.registriesState.currentDrillLevel()
+	if level == nil || level.item != parentItem {
+		return
+	}
+
+	if err != nil {
+		level.err = err.Error()
+		gui.Panels.Registries.NoItemsMessage = err.Error()
+		gui.Panels.Registries.SetItems([]*registryItem{})
+		_ = gui.QueueTask(gui.NewSimpleRenderStringTask(func() string {
+			return err.Error()
+		}))
+		_ = gui.Panels.Registries.RerenderList()
+		return
+	}
+
+	level.err = ""
+	items := make([]*registryItem, len(repos))
+	for i, r := range repos {
+		items[i] = &registryItem{
+			Kind:       registryKindRepository,
+			Host:       parentItem.Host,
+			Repository: r.Name,
+			Visibility: r.Visibility,
+		}
+	}
+
+	gui.Panels.Registries.NoItemsMessage = gui.Tr.NoRepositories
+	gui.Panels.Registries.SetItems(items)
+	if len(items) == 0 {
+		_ = gui.QueueTask(gui.NewSimpleRenderStringTask(func() string {
+			return gui.Tr.NoRepositories
+		}))
+	} else if gui.IsCurrentView(gui.Views.Registries) {
+		_ = gui.Panels.Registries.HandleSelect()
+	}
+	_ = gui.Panels.Registries.RerenderList()
 }
 
 // refreshRegistries re-reads saved connections and auto-detected auth sources

@@ -53,6 +53,9 @@ func (gui *Gui) showRegistryToast(message string) {
 }
 
 func (gui *Gui) handleAddRegistryConnection(g *gocui.Gui, v *gocui.View) error {
+	if gui.isRegistriesDrilledDown() {
+		return nil
+	}
 	return gui.openRegistryKindMenu(connections.KindRegistry, func(kind connections.Kind) error {
 		initialURL := defaultURLForKind(kind)
 		return gui.promptRegistryConnectionChain(
@@ -69,7 +72,7 @@ func (gui *Gui) handleAddRegistryConnection(g *gocui.Gui, v *gocui.View) error {
 }
 
 func (gui *Gui) handleEditRegistryConnection(g *gocui.Gui, v *gocui.View) error {
-	if gui.Panels.Registries == nil {
+	if gui.Panels.Registries == nil || gui.isRegistriesDrilledDown() {
 		return nil
 	}
 	item, err := gui.Panels.Registries.GetSelectedItem()
@@ -114,7 +117,7 @@ func (gui *Gui) handleEditRegistryConnection(g *gocui.Gui, v *gocui.View) error 
 }
 
 func (gui *Gui) handleDeleteRegistryConnection(g *gocui.Gui, v *gocui.View) error {
-	if gui.Panels.Registries == nil {
+	if gui.Panels.Registries == nil || gui.isRegistriesDrilledDown() {
 		return nil
 	}
 	item, err := gui.Panels.Registries.GetSelectedItem()

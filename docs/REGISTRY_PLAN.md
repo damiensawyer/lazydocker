@@ -214,7 +214,7 @@ title, `SelectedItems()` falling back to the cursor item) — lazydocker has no 
 anywhere, and this is a change to the generic panel every side list uses, so it is heavy
 and must leave every existing panel's behaviour unchanged.
 
-- [ ] **L4.1 Repository drill-down.** `[medium | F-0009,S-04 | after L3.1]`
+- [x] **L4.1 Repository drill-down.** `[medium | F-0009,S-04 | after L3.1]`
 - [ ] **L4.2 Tag list.** `[medium | F-0010,S-03,S-04 | after L4.1 L1.2]`
 - [ ] **L4.3 Copy pull command.** `[medium | F-0019,S-04,S-06 | after L4.2]`
 - [x] **L4.4 Multi-select in side lists.** `[heavy | F-0012,S-04 | after L0.1]`
@@ -321,3 +321,4 @@ Append at the top; take the next free `D-0NN` at commit time.
 | L7.1 | (see git log --grep '[L7.1]') | pkg/commands PullImage (partial: commands layer): reference.ParseNormalizedNamed validation, auth ServerAddress/domain matching (including Docker Hub aliases), base64url RegistryAuth encoding with error scrubbing, ImagePull JSON stream decoding, and FoldPullProgress in-place layer folding, by gemini |
 | L1.3 | (see git log --grep '[L1.3]') | pkg/registry tag details (config blob fetch + digest verification, index platform resolution, layers + total size), TagsSharingDigest, DeleteManifest (typed ErrDeleteUnsupported / 401 / 403 / 404) + registrytest blobs/redirect/delete fixture, by gemini-2 |
 | L3.2 | (see git log --grep '[L3.2]') | connection add/edit/delete via menu + prompts + masked secret; saved/auto merge; started by gemini-3, finished by opus |
+| L4.1 | (see git log --grep '[L4.1]') | repository drill-down (Enter/Esc navigation, breadcrumb title, async load & generation guard, per-kind client source, inert connection CRUD), by gemini-flash-3 |

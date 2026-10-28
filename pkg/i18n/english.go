@@ -178,6 +178,11 @@ type TranslationSet struct {
 	CannotEditAutoDetectedRegistry    string
 	RegistryExternalCredentialTitle   string
 	RegistryExternalCredentialMessage string
+
+	// L4.1 — Repository drill-down
+	NoRepositories              string
+	RegistriesSummaryRepository string
+	RegistriesSummaryVisibility string
 }
 
 func englishSet() TranslationSet {
@@ -363,5 +368,10 @@ func englishSet() TranslationSet {
 		CannotEditAutoDetectedRegistry:    "Auto-detected registry logins come from your Docker/Podman config and cannot be edited here.",
 		RegistryExternalCredentialTitle:   "Existing Login Detected",
 		RegistryExternalCredentialMessage: "An existing Docker login was found for this registry and will be used as-is.",
+
+		// L4.1 — Repository drill-down
+		NoRepositories:              "No repositories",
+		RegistriesSummaryRepository: "Repository:",
+		RegistriesSummaryVisibility: "Visibility:",
 	}
 }

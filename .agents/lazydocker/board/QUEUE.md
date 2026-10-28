@@ -53,7 +53,7 @@ Locks change by the minute — `board.sh` beats this table.
 | L1.3 config blob + delete | L1.2 |
 | L3.2 ⚠️ connection CRUD | L3.1, L2.2 |
 | L3.3 status + i18n (light) | L3.1 |
-| L4.1 → L4.2 → L4.3 browsing, copy | L3.1, L1.2 |
+| ~~L4.1~~ → L4.2 → L4.3 browsing, copy | L3.1, L1.2 |
 | L5.1 → L5.2 tag details | L4.2, L1.3 |
 | L6.1 → L6.2 deletes | L4.2, L4.4, L1.3 |
 | L7.1 ⚠️ pull → L7.2 run | L5.1 |
