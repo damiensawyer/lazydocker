@@ -239,9 +239,12 @@ func TestTokenCache(t *testing.T) {
 		t.Fatal("empty cache must miss")
 	}
 
-	tc.set("r", "s", "sc", "tok1", time.Minute)
-	if tok, ok := tc.get("r", "s", "sc"); !ok || tok != "tok1" {
-		t.Fatalf("get after set = %q, %v", tok, ok)
+	tc.set("r", "s", "sc", "tok1", time.Minute, false)
+	if entry, ok := tc.get("r", "s", "sc"); !ok || entry.token != "tok1" {
+		t.Fatalf("get after set = %q, %v, want tok1", entry.token, ok)
+	}
+	if entry, _ := tc.get("r", "s", "sc"); entry.derived {
+		t.Error("token cached as derived without credential exchange")
 	}
 
 	// Different scope is a different cache entry.
@@ -253,12 +256,19 @@ func TestTokenCache(t *testing.T) {
 	if _, ok := tc.get("r", "s", "sc"); ok {
 		t.Fatal("invalidated entry must miss")
 	}
+
+	// The derived flag rides with the entry and decides where a token may
+	// later be attached.
+	tc.set("r", "s", "sc", "tok2", time.Minute, true)
+	if entry, ok := tc.get("r", "s", "sc"); !ok || !entry.derived {
+		t.Fatalf("get after derived set = %+v, %v, want derived", entry, ok)
+	}
 }
 
 func TestTokenCacheExpiry(t *testing.T) {
 	tc := newTokenCache()
 	// A short ttl minus its refresh slack expires almost immediately.
-	tc.set("r", "s", "sc", "tok", 20*time.Millisecond)
+	tc.set("r", "s", "sc", "tok", 20*time.Millisecond, false)
 	if _, ok := tc.get("r", "s", "sc"); !ok {
 		t.Fatal("fresh short-ttl token must still be valid")
 	}
@@ -267,7 +277,7 @@ func TestTokenCacheExpiry(t *testing.T) {
 		t.Fatal("expired token must miss")
 	}
 
-	tc.set("r", "s", "sc", "tok", time.Hour)
+	tc.set("r", "s", "sc", "tok", time.Hour, false)
 	if _, ok := tc.get("r", "s", "sc"); !ok {
 		t.Fatal("long-ttl token must be valid")
 	}

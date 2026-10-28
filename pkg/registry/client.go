@@ -158,9 +158,9 @@ func (c *Client) Ping(ctx context.Context) (PingResult, error) {
 }
 
 // do performs an authenticated registry request and returns the raw
-// response. It is the workhorse later tasks (catalog, tags, manifests,
-// blobs, deletes) build on: URL assembly, auth flows and scheme fallback all
-// happen here. query may be nil.
+// response. It is the workhorse the endpoint helpers (ping, catalog,
+// tags, manifests, blobs, deletes) build on: URL assembly, auth flows and
+// scheme fallback all happen here. query may be nil.
 func (c *Client) do(ctx context.Context, method, path string, query map[string]string, header http.Header) (*http.Response, error) {
 	if !strings.HasPrefix(path, "/") {
 		return nil, fmt.Errorf("registry: path %q must start with '/'", path)
@@ -173,12 +173,21 @@ func (c *Client) do(ctx context.Context, method, path string, query map[string]s
 		}
 		full += "?" + v.Encode()
 	}
+	return c.doURL(ctx, method, full, header)
+}
 
-	req, err := http.NewRequestWithContext(ctx, method, full, nil)
+// doURL performs an authenticated registry request against an absolute
+// URL — the form pagination Link headers hand back. The default Accept
+// header is application/json unless header supplies its own (manifest
+// requests negotiate their media types through it).
+func (c *Client) doURL(ctx context.Context, method, rawURL string, header http.Header) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, method, rawURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("registry: new request: %w", err)
 	}
-	req.Header.Set("Accept", "application/json")
+	if header.Get("Accept") == "" {
+		req.Header.Set("Accept", "application/json")
+	}
 	for k, vs := range header {
 		for _, v := range vs {
 			req.Header.Add(k, v)

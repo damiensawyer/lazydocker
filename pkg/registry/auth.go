@@ -200,7 +200,12 @@ type tokenResponse struct {
 }
 
 // tokenCache caches bearer tokens per challenge (realm+service+scope) with
-// expiry, so a session does not re-authenticate on every request.
+// expiry, so a session does not re-authenticate on every request. A token is
+// marked derived when it was obtained by exchanging credential material at
+// the realm; only derived tokens are treated as credential material by the
+// attach policy (an anonymous pull token grants nothing its requester did
+// not already have, and riding it over plain http is how insecure registries
+// work).
 type tokenCache struct {
 	mu     sync.Mutex
 	tokens map[string]cachedToken
@@ -209,6 +214,7 @@ type tokenCache struct {
 type cachedToken struct {
 	token     string
 	expiresAt time.Time
+	derived   bool // credential material was exchanged for this token
 }
 
 func newTokenCache() *tokenCache {
@@ -219,21 +225,21 @@ func (c *tokenCache) key(realm, service, scope string) string {
 	return realm + "\x00" + service + "\x00" + scope
 }
 
-func (c *tokenCache) get(realm, service, scope string) (string, bool) {
+func (c *tokenCache) get(realm, service, scope string) (cachedToken, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	entry, ok := c.tokens[c.key(realm, service, scope)]
 	if !ok {
-		return "", false
+		return cachedToken{}, false
 	}
 	if !entry.expiresAt.IsZero() && time.Now().After(entry.expiresAt) {
 		delete(c.tokens, c.key(realm, service, scope))
-		return "", false
+		return cachedToken{}, false
 	}
-	return entry.token, true
+	return entry, true
 }
 
-func (c *tokenCache) set(realm, service, scope, token string, ttl time.Duration) {
+func (c *tokenCache) set(realm, service, scope, token string, ttl time.Duration, derived bool) {
 	var expiresAt time.Time
 	if ttl > 0 {
 		// Refresh a little early: a token that expires the moment it is
@@ -242,7 +248,7 @@ func (c *tokenCache) set(realm, service, scope, token string, ttl time.Duration)
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.tokens[c.key(realm, service, scope)] = cachedToken{token: token, expiresAt: expiresAt}
+	c.tokens[c.key(realm, service, scope)] = cachedToken{token: token, expiresAt: expiresAt, derived: derived}
 }
 
 func (c *tokenCache) invalidate(realm, service, scope string) {
@@ -260,14 +266,20 @@ func tokenRefreshSlack(ttl time.Duration) time.Duration {
 }
 
 // authTransport is an http.RoundTripper implementing the OCI distribution
-// auth flow on top of a base transport:
+// auth flow on top of a base transport. It only treats requests whose URL
+// host:port is the registry's own — every other request (a redirect target
+// such as a CDN or S3 blob host, reached because http.Client follows
+// redirects through this same transport) passes through untouched, with no
+// credential attached and no 401 handling. For the registry's own requests:
 //
-//   - a stored RegistryToken is attached to every request;
+//   - a stored RegistryToken is attached to every request (when the attach
+//     policy allows the URL);
 //   - on 401 with a Basic challenge, the request is retried once with basic
-//     auth (when material exists);
+//     auth (when material exists and the policy allows the URL);
 //   - on 401 with a Bearer challenge, a token is fetched from the challenged
 //     realm (per-scope cache, credential attached only when the credential
-//     policy allows that realm) and the request is retried once.
+//     policy allows that realm) and the request is retried once — again only
+//     when the policy allows attaching the token to the URL.
 //
 // A 401 after a fresh token is final and returned to the caller.
 type authTransport struct {
@@ -282,8 +294,21 @@ func (t *authTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		return nil, errors.New("registry: auth transport has no base transport")
 	}
 
-	// A ready registry token short-circuits every flow.
-	if t.cred.hasRegistryToken() {
+	// Requests not aimed at the registry itself pass through untouched.
+	// http.Client follows redirects (blob GETs commonly redirect to a
+	// CDN/S3 host) and the redirected request runs through this transport
+	// with the foreign host's URL: attaching this registry's credential
+	// material there, retrying it with basic auth, or honouring a 401
+	// challenge naming that host's own realm would all leak the material
+	// to a host it does not belong to.
+	if req.URL == nil || !sameHostPort(t.policy.registryHost, req.URL) {
+		return t.base.RoundTrip(req)
+	}
+
+	// A ready registry token short-circuits every flow — but only where the
+	// policy allows the request's own URL (never over plain http to a
+	// non-loopback host, e.g. after an insecure downgrade).
+	if t.cred.hasRegistryToken() && t.policy.maySendCredentialTo(req.URL, false) == nil {
 		return t.base.RoundTrip(withBearer(req, t.cred.RegistryToken))
 	}
 
@@ -295,6 +320,8 @@ func (t *authTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		return resp, nil
 	}
 
+	// Only the registry's own requests reach here (see the pass-through
+	// above), so any challenge below is the registry's own word.
 	challenges := parseChallenges(resp.Header.Values("Www-Authenticate"))
 	if len(challenges) == 0 {
 		return resp, nil
@@ -304,6 +331,12 @@ func (t *authTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		return t.roundTripBearer(req, resp, c)
 	}
 	if basicChallenge(challenges) && t.cred.hasBasicAuth() {
+		// Basic material is credential material: it is retried only where
+		// the policy allows this request's URL (a plain-http non-loopback
+		// URL — e.g. an insecure scheme downgrade — must not get it).
+		if t.policy.maySendCredentialTo(req.URL, false) != nil {
+			return resp, nil
+		}
 		resp.Body.Close()
 		return t.base.RoundTrip(withBasicAuth(req, t.cred.Username, t.cred.Password))
 	}
@@ -311,6 +344,8 @@ func (t *authTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 }
 
 // roundTripBearer exchanges the 401 for a bearer token and retries once.
+// Only requests to the registry host reach here (RoundTrip passes every
+// other request through), so the challenge is the registry's own.
 func (t *authTransport) roundTripBearer(req *http.Request, unauthorized *http.Response, c challenge) (*http.Response, error) {
 	realm := c.params["realm"]
 	if realm == "" {
@@ -331,12 +366,23 @@ func (t *authTransport) roundTripBearer(req *http.Request, unauthorized *http.Re
 		return nil, fmt.Errorf("registry: parse token realm: %w", err)
 	}
 
+	// The realm counts as "named by the registry's own challenge" only when
+	// the 401 actually came from the registry host — recorded rather than
+	// assumed, so a future call path cannot silently turn a foreign 401 into
+	// credential transport.
+	viaOwnChallenge := req.URL != nil && sameHostPort(t.policy.registryHost, req.URL)
+
 	service := c.params["service"]
 	scope := c.params["scope"]
 
-	token, ok := t.tokens.get(realm, service, scope)
-	if ok {
-		resp, err := t.base.RoundTrip(withBearer(req, token))
+	if entry, ok := t.tokens.get(realm, service, scope); ok {
+		if !t.mayAttachToken(req, entry.derived) {
+			// The cached token carries credential material this URL may not
+			// receive; return the 401 rather than retry without it (which
+			// would only repeat it) or attach it (which would leak it).
+			return unauthorized, nil
+		}
+		resp, err := t.base.RoundTrip(withBearer(req, entry.token))
 		if err != nil {
 			return nil, err
 		}
@@ -349,7 +395,7 @@ func (t *authTransport) roundTripBearer(req *http.Request, unauthorized *http.Re
 		t.tokens.invalidate(realm, service, scope)
 	}
 
-	token, ttl, err := t.fetchToken(req.Context(), realmURL, service, scope)
+	token, ttl, derived, err := t.fetchToken(req.Context(), realmURL, service, scope, viaOwnChallenge)
 	if err != nil {
 		// Some registries (e.g. Quay) refuse anonymous or unscoped token
 		// requests. Return the original 401 so callers can tell an
@@ -357,17 +403,39 @@ func (t *authTransport) roundTripBearer(req *http.Request, unauthorized *http.Re
 		return unauthorized, nil
 	}
 
-	t.tokens.set(realm, service, scope, token, ttl)
+	t.tokens.set(realm, service, scope, token, ttl, derived)
+	if !t.mayAttachToken(req, derived) {
+		// Same rule as the cached path above: a credential-derived token
+		// never travels to a URL the policy refuses.
+		return unauthorized, nil
+	}
 	unauthorized.Body.Close()
 	return t.base.RoundTrip(withBearer(req, token))
 }
 
+// mayAttachToken reports whether a bearer token may be attached to req. A
+// token fetched anonymously exchanged no credential material and is not
+// itself a credential (insecure plain-http registries hand those to every
+// unauthenticated caller); a credential-derived token is, and obeys the
+// full attach policy against the request's actual URL.
+func (t *authTransport) mayAttachToken(req *http.Request, credentialDerived bool) bool {
+	if req.URL == nil {
+		return false
+	}
+	if !credentialDerived {
+		return req.URL.Scheme == "http" || req.URL.Scheme == "https"
+	}
+	return t.policy.maySendCredentialTo(req.URL, false) == nil
+}
+
 // fetchToken performs the token request against realmURL. The credential is
-// attached only when the credential policy allows the realm; otherwise the
-// request proceeds anonymously (better an unauthorized ping than a leaked
-// credential). The realm is only ever reached via a registry's own challenge,
-// which is what makes the cross-host rule meaningful.
-func (t *authTransport) fetchToken(ctx context.Context, realmURL *url.URL, service, scope string) (string, time.Duration, error) {
+// attached only when the credential policy allows the realm (which requires
+// the challenge to have come from the registry host itself, viaChallenge);
+// otherwise the request proceeds anonymously (better an unauthorized ping
+// than a leaked credential). The returned derived flag reports whether
+// credential material was exchanged for the token, which decides where the
+// token may later be attached.
+func (t *authTransport) fetchToken(ctx context.Context, realmURL *url.URL, service, scope string, viaChallenge bool) (string, time.Duration, bool, error) {
 	q := realmURL.Query()
 	if service != "" {
 		q.Set("service", service)
@@ -380,24 +448,27 @@ func (t *authTransport) fetchToken(ctx context.Context, realmURL *url.URL, servi
 
 	tokenReq, err := http.NewRequestWithContext(ctx, http.MethodGet, tokenURL.String(), nil)
 	if err != nil {
-		return "", 0, fmt.Errorf("registry: new token request: %w", err)
+		return "", 0, false, fmt.Errorf("registry: new token request: %w", err)
 	}
 	tokenReq.Header.Set("Accept", "application/json")
 
 	// Attach credential material only when the policy allows this realm;
 	// a refusal downgrades the request to anonymous rather than leaking.
-	if t.policy.maySendCredentialTo(realmURL, true) == nil {
+	derived := false
+	if t.policy.maySendCredentialTo(realmURL, viaChallenge) == nil {
 		switch {
 		case t.cred.hasIdentityToken():
 			tokenReq.Header.Set("Authorization", "Bearer "+t.cred.IdentityToken)
+			derived = true
 		case t.cred.hasBasicAuth():
 			tokenReq.SetBasicAuth(t.cred.Username, t.cred.Password)
+			derived = true
 		}
 	}
 
 	resp, err := t.base.RoundTrip(tokenReq)
 	if err != nil {
-		return "", 0, fmt.Errorf("registry: token endpoint: %w", err)
+		return "", 0, false, fmt.Errorf("registry: token endpoint: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -406,22 +477,22 @@ func (t *authTransport) fetchToken(ctx context.Context, realmURL *url.URL, servi
 		// The body is the registry's own error text, never ours to leak; it
 		// cannot contain the credential because it was not sent unless the
 		// policy allowed it.
-		return "", 0, fmt.Errorf("registry: token endpoint returned %s: %s",
+		return "", 0, false, fmt.Errorf("registry: token endpoint returned %s: %s",
 			resp.Status, strings.TrimSpace(string(body)))
 	}
 
 	var parsed tokenResponse
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&parsed); err != nil {
-		return "", 0, fmt.Errorf("registry: decode token response: %w", err)
+		return "", 0, false, fmt.Errorf("registry: decode token response: %w", err)
 	}
 	token := parsed.Token
 	if token == "" {
 		token = parsed.AccessToken
 	}
 	if token == "" {
-		return "", 0, errors.New("registry: token endpoint returned an empty token")
+		return "", 0, false, errors.New("registry: token endpoint returned an empty token")
 	}
-	return token, time.Duration(parsed.ExpiresIn) * time.Second, nil
+	return token, time.Duration(parsed.ExpiresIn) * time.Second, derived, nil
 }
 
 func withBearer(req *http.Request, token string) *http.Request {

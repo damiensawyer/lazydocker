@@ -1,9 +1,10 @@
 // Package registrytest provides an in-process fake OCI registry for tests:
 // an httptest.Server speaking enough of the distribution spec (/v2/ ping,
-// basic auth, bearer-token realm) for pkg/registry tests to run with zero
-// network and zero docker daemon. Later tasks extend it with catalog, tags,
-// manifests and blobs; behaviour is driven by Config, and every request is
-// recorded (scheme only — Authorization values are never stored).
+// basic auth, bearer-token realm with per-scope tokens, /v2/_catalog,
+// /v2/<name>/tags/list and /v2/<name>/manifests/<ref>) for pkg/registry
+// tests to run with zero network and zero docker daemon. Behaviour is
+// driven by Config (data, not code), and every request is recorded (scheme
+// only — Authorization values are never stored).
 package registrytest
 
 import (
@@ -15,9 +16,14 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/opencontainers/go-digest"
 )
 
 // AuthMode selects how the fake registry authenticates requests.
@@ -29,12 +35,12 @@ const (
 	// AuthBasic requires HTTP basic auth on /v2/ endpoints.
 	AuthBasic AuthMode = "basic"
 	// AuthBearer requires a bearer token on /v2/ endpoints; tokens are
-	// issued by this server's /token endpoint (or a realm override).
+	// issued by this server's /token endpoint (or a realm override),
+	// bound to the scopes the token request asked for.
 	AuthBearer AuthMode = "bearer"
 )
 
-// Config drives the fake registry. It is data, not code: later phases add
-// fields (repositories, tags, manifests, blobs) rather than new servers.
+// Config drives the fake registry. It is data, not code.
 type Config struct {
 	// Auth selects the authentication mode (default AuthNone).
 	Auth AuthMode
@@ -59,6 +65,45 @@ type Config struct {
 	// TLS, when set, starts the server with TLS using exactly this config
 	// (certificates included), so tests can exercise custom CA behaviour.
 	TLS *tls.Config
+
+	// Repositories is the catalog the server serves: its tags and their
+	// manifests. The catalog lists the repository names sorted (as
+	// docker's registry does).
+	Repositories []Repository
+
+	// CatalogPageSize, when > 0, forces /v2/_catalog pages of at most this
+	// many entries (with a Link rel="next" while more remain), whatever n
+	// the client asked for — server-forced pagination. Zero lets the
+	// client's n govern, serving everything at once when it sends no n
+	// (docker registry:2's default).
+	CatalogPageSize int
+
+	// TagsPageSize does the same for /v2/<name>/tags/list.
+	TagsPageSize int
+}
+
+// Repository is one repository in the fake registry.
+type Repository struct {
+	Name string
+	// Tags maps tag name to the manifest served at
+	// /v2/<name>/manifests/<tag>. Every manifest is also served by digest.
+	Tags map[string]Manifest
+	// Manifests holds additional untagged manifests (such as the platform
+	// children of a multi-arch index) served by digest at
+	// /v2/<name>/manifests/<digest> without appearing in /v2/<name>/tags/list.
+	Manifests []Manifest
+}
+
+// Manifest is what the server serves for a tag (or digest) reference.
+type Manifest struct {
+	// MediaType is served as Content-Type: an image manifest or index
+	// media type (OCI or Docker v2).
+	MediaType string
+	// Body is served verbatim.
+	Body []byte
+	// ContentDigest overrides the Docker-Content-Digest header (default:
+	// the digest of Body) — for client digest-mismatch handling.
+	ContentDigest string
 }
 
 // Request is a recorded incoming request. Authorization is reduced to its
@@ -68,8 +113,16 @@ type Request struct {
 	Method        string
 	Path          string
 	RawQuery      string
+	Accept        string
 	Authorization string // "", "basic" or "bearer"
 	BasicUsername string // decoded username, only for basic auth
+}
+
+// issuedToken is a token this server's realm handed out, with the scopes it
+// was bound to.
+type issuedToken struct {
+	username string
+	scopes   map[string]bool
 }
 
 // Server is the fake registry. All methods are safe for concurrent use.
@@ -77,9 +130,11 @@ type Server struct {
 	srv *httptest.Server
 	cfg Config
 
+	byName map[string]Repository
+
 	mu         sync.Mutex
 	recorded   []Request
-	issued     map[string]string // token -> username it identifies ("" = anonymous)
+	issued     map[string]issuedToken
 	issueCount int
 }
 
@@ -93,7 +148,11 @@ func New(cfg Config) *Server {
 	}
 	s := &Server{
 		cfg:    cfg,
-		issued: map[string]string{},
+		byName: map[string]Repository{},
+		issued: map[string]issuedToken{},
+	}
+	for _, repo := range cfg.Repositories {
+		s.byName[repo.Name] = repo
 	}
 	s.srv = httptest.NewUnstartedServer(s.handler())
 	// Clients are expected to probe https against the plain-http port (the
@@ -169,11 +228,11 @@ func (s *Server) TokensIssued() int {
 }
 
 // handler builds the full mux: recording middleware around the auth-aware
-// /v2/ ping, the /token realm, and a catch-all returning OCI-shaped errors
-// that later phases replace with real endpoints.
+// /v2/ tree (ping, catalog, tags, manifests), the /token realm, and a
+// catch-all returning OCI-shaped errors.
 func (s *Server) handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v2/", s.handleV2Root)
+	mux.HandleFunc("/v2/", s.handleV2)
 	mux.HandleFunc("/token", s.handleToken)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeOCIError(w, http.StatusNotFound, "NAME_UNKNOWN", "registrytest: unknown endpoint "+r.URL.Path)
@@ -181,40 +240,241 @@ func (s *Server) handler() http.Handler {
 	return s.recordMiddleware(mux)
 }
 
-// handleV2Root answers GET /v2/ (and any not-yet-implemented /v2/... path
-// with 404, the extension point for catalog/tags/manifests/blobs).
-func (s *Server) handleV2Root(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/v2/" && r.URL.Path != "/v2" {
-		writeOCIError(w, http.StatusNotFound, "NAME_UNKNOWN", "registrytest: unknown endpoint "+r.URL.Path)
+// handleV2 routes the /v2/ tree: the ping, the catalog, tags lists and
+// manifest fetches, everything else 404.
+func (s *Server) handleV2(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Docker-Distribution-Api-Version", "registry/2.0")
+
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		writeOCIError(w, http.StatusMethodNotAllowed, "UNSUPPORTED", "registrytest: method not allowed")
 		return
 	}
 
-	w.Header().Set("Docker-Distribution-Api-Version", "registry/2.0")
+	path := r.URL.Path
+	switch {
+	case path == "/v2/" || path == "/v2":
+		if !s.authorize(w, r, "") {
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("{}"))
 
+	case path == "/v2/_catalog":
+		if !s.authorize(w, r, "registry:catalog:*") {
+			return
+		}
+		s.handleCatalog(w, r)
+
+	default:
+		rest := strings.TrimPrefix(path, "/v2/")
+		if name, ok := strings.CutSuffix(rest, "/tags/list"); ok && name != "" {
+			if !s.authorize(w, r, repositoryScope(name)) {
+				return
+			}
+			s.handleTags(w, r, name)
+			return
+		}
+		if name, ref, ok := strings.Cut(rest, "/manifests/"); ok && name != "" && ref != "" {
+			if !s.authorize(w, r, repositoryScope(name)) {
+				return
+			}
+			s.handleManifest(w, r, name, ref)
+			return
+		}
+		writeOCIError(w, http.StatusNotFound, "NAME_UNKNOWN", "registrytest: unknown endpoint "+path)
+	}
+}
+
+// repositoryScope is the pull scope a repository endpoint demands and names
+// in its Bearer challenges.
+func repositoryScope(name string) string {
+	return "repository:" + name + ":pull"
+}
+
+// authorize enforces Config.Auth for one /v2/ request needing the given
+// scope ("" for the ping, which needs none). It writes the refusal itself;
+// false means the handler must return.
+func (s *Server) authorize(w http.ResponseWriter, r *http.Request, scope string) bool {
 	switch s.cfg.Auth {
 	case AuthBasic:
 		user, pass, ok := r.BasicAuth()
 		if !ok || !s.validBasic(user, pass) {
 			w.Header().Set("Www-Authenticate", `Basic realm="registrytest"`)
 			writeOCIError(w, http.StatusUnauthorized, "UNAUTHORIZED", "authentication required")
-			return
+			return false
 		}
 	case AuthBearer:
-		if !s.validBearer(r.Header.Get("Authorization")) {
-			w.Header().Set("Www-Authenticate",
-				fmt.Sprintf(`Bearer realm=%q,service=%q`, s.RealmURL(), s.Host()))
+		if !s.validBearer(r.Header.Get("Authorization"), scope) {
+			challenge := fmt.Sprintf(`Bearer realm=%q,service=%q`, s.RealmURL(), s.Host())
+			if scope != "" {
+				challenge += fmt.Sprintf(`,scope=%q`, scope)
+			}
+			w.Header().Set("Www-Authenticate", challenge)
 			writeOCIError(w, http.StatusUnauthorized, "UNAUTHORIZED", "authentication required")
-			return
+			return false
 		}
 	}
-
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte("{}"))
+	return true
 }
 
-// handleToken is the bearer realm: it issues tokens for valid basic auth,
-// 401s for invalid basic auth, and issues anonymous tokens when no
-// credential is presented.
+// catalogNames returns the configured repository names, sorted.
+func (s *Server) catalogNames() []string {
+	names := make([]string, 0, len(s.byName))
+	for name := range s.byName {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// handleCatalog serves GET /v2/_catalog, honoring the client's n and the
+// server's forced page size, resuming after last, and emitting a Link
+// rel="next" while entries remain.
+func (s *Server) handleCatalog(w http.ResponseWriter, r *http.Request) {
+	s.serveNamePage(w, r.URL.Query(), s.catalogNames(), "/v2/_catalog", func(names []string) any {
+		return map[string]any{"repositories": names}
+	}, s.cfg.CatalogPageSize)
+}
+
+// handleTags serves GET /v2/<name>/tags/list for a known repository.
+func (s *Server) handleTags(w http.ResponseWriter, r *http.Request, name string) {
+	repo, ok := s.byName[name]
+	if !ok {
+		writeOCIError(w, http.StatusNotFound, "NAME_UNKNOWN",
+			fmt.Sprintf("repository name not known to registry: %s", name))
+		return
+	}
+	tags := make([]string, 0, len(repo.Tags))
+	for tag := range repo.Tags {
+		tags = append(tags, tag)
+	}
+	sort.Strings(tags)
+	path := "/v2/" + name + "/tags/list"
+	s.serveNamePage(w, r.URL.Query(), tags, path, func(page []string) any {
+		return map[string]any{"name": name, "tags": page}
+	}, s.cfg.TagsPageSize)
+}
+
+// serveNamePage slices names into a page and renders it, walking the
+// n / last / forced-page-size semantics shared by catalog and tags.
+func (s *Server) serveNamePage(w http.ResponseWriter, q url.Values, names []string, path string, render func([]string) any, forcedSize int) {
+	pageSize := 0
+	if n := q.Get("n"); n != "" {
+		if parsed, err := strconv.Atoi(n); err == nil && parsed > 0 {
+			pageSize = parsed
+		}
+	}
+	if forcedSize > 0 && (pageSize == 0 || pageSize > forcedSize) {
+		pageSize = forcedSize
+	}
+
+	// Resume strictly after "last" in the sorted order.
+	start := 0
+	if last := q.Get("last"); last != "" {
+		for i, name := range names {
+			if name <= last {
+				start = i + 1
+			} else {
+				break
+			}
+		}
+	}
+	end := len(names)
+	if pageSize > 0 && start+pageSize < end {
+		end = start + pageSize
+	}
+	page := names[start:end]
+
+	if end < len(names) && len(page) > 0 {
+		next := url.Values{}
+		next.Set("last", page[len(page)-1])
+		if q.Get("n") != "" {
+			next.Set("n", q.Get("n"))
+		}
+		w.Header().Set("Link", fmt.Sprintf(`<%s?%s>; rel="next"`, path, next.Encode()))
+	}
+
+	body, err := json.Marshal(render(page))
+	if err != nil {
+		http.Error(w, "registrytest: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(body)
+}
+
+func isHead(r *http.Request) bool { return r.Method == http.MethodHead }
+
+// handleManifest serves GET /v2/<name>/manifests/<ref> for a known
+// repository, where ref is a tag or a digest.
+func (s *Server) handleManifest(w http.ResponseWriter, r *http.Request, name, ref string) {
+	repo, ok := s.byName[name]
+	if !ok {
+		writeOCIError(w, http.StatusNotFound, "NAME_UNKNOWN",
+			fmt.Sprintf("repository name not known to registry: %s", name))
+		return
+	}
+
+	var manifest *Manifest
+	if _, err := digest.Parse(ref); err == nil {
+		for _, tag := range sortedTagNames(repo.Tags) {
+			m := repo.Tags[tag]
+			if contentDigest(m) == ref {
+				manifest = &m
+				break
+			}
+		}
+		if manifest == nil {
+			for i := range repo.Manifests {
+				m := repo.Manifests[i]
+				if contentDigest(m) == ref {
+					manifest = &m
+					break
+				}
+			}
+		}
+	} else if m, isTag := repo.Tags[ref]; isTag {
+		manifest = &m
+	}
+	if manifest == nil {
+		writeOCIError(w, http.StatusNotFound, "MANIFEST_UNKNOWN",
+			fmt.Sprintf("manifest unknown to registry: %s/%s", name, ref))
+		return
+	}
+
+	w.Header().Set("Content-Type", manifest.MediaType)
+	w.Header().Set("Docker-Content-Digest", contentDigest(*manifest))
+	w.WriteHeader(http.StatusOK)
+	if isHead(r) {
+		return
+	}
+	_, _ = w.Write(manifest.Body)
+}
+
+// contentDigest is a manifest's advertised digest: the override when set,
+// else the digest of its body.
+func contentDigest(m Manifest) string {
+	if m.ContentDigest != "" {
+		return m.ContentDigest
+	}
+	return digest.FromBytes(m.Body).String()
+}
+
+func sortedTagNames(tags map[string]Manifest) []string {
+	names := make([]string, 0, len(tags))
+	for name := range tags {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// handleToken is the bearer realm: it issues scope-bound tokens for valid
+// basic auth, 401s for invalid basic auth, and issues anonymous tokens when
+// no credential is presented. The requested scopes (comma- or
+// space-separated, as token servers accept both) ride with the token and
+// gate which /v2/ endpoints accept it.
 func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 	username := ""
 	if user, pass, ok := r.BasicAuth(); ok {
@@ -226,13 +486,27 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		username = user
 	}
 
-	s.mu.Lock()
+	scopes := map[string]bool{}
+	for _, scope := range strings.FieldsFunc(r.URL.Query().Get("scope"), func(ru rune) bool {
+		return ru == ',' || ru == ' '
+	}) {
+		if scope != "" {
+			scopes[scope] = true
+		}
+	}
+
 	token := "registrytest-token/anonymous"
 	if username != "" {
 		token = "registrytest-token/" + username
 	}
-	s.issued[token] = username
+
+	s.mu.Lock()
+	// Every grant is its own token (real token servers never hand the same
+	// string for two different scopes); the issue counter keeps them
+	// distinct so one grant cannot overwrite another's scopes.
 	s.issueCount++
+	token = fmt.Sprintf("%s/%d", token, s.issueCount)
+	s.issued[token] = issuedToken{username: username, scopes: scopes}
 	s.mu.Unlock()
 
 	w.Header().Set("Content-Type", "application/json")
@@ -254,16 +528,20 @@ func (s *Server) validBasic(user, pass string) bool {
 }
 
 // validBearer checks the Authorization header names a token this server
-// issued (bearer tokens are accepted in the form "Bearer <token>").
-func (s *Server) validBearer(header string) bool {
+// issued AND that the token was bound to the scope the endpoint demands
+// (any scope satisfies the scope-less ping).
+func (s *Server) validBearer(header, requiredScope string) bool {
 	token, ok := strings.CutPrefix(header, "Bearer ")
 	if !ok {
 		return false
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, issued := s.issued[token]
-	return issued
+	issued, known := s.issued[token]
+	if !known {
+		return false
+	}
+	return requiredScope == "" || issued.scopes[requiredScope]
 }
 
 // recordMiddleware records every request before it reaches the mux.
@@ -281,6 +559,7 @@ func (s *Server) record(r *http.Request) {
 		Method:   r.Method,
 		Path:     r.URL.Path,
 		RawQuery: r.URL.RawQuery,
+		Accept:   r.Header.Get("Accept"),
 	}
 	if header := r.Header.Get("Authorization"); header != "" {
 		switch {

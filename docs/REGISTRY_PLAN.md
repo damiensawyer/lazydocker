@@ -146,7 +146,7 @@ package version whose tags contain the target; deleting the version removes all 
 same blast-radius reporting as L1.3).
 
 - [x] **L1.1 Registry client core.** `[medium | F-0008,S-01,S-07 | after L0.1]`
-- [ ] **L1.2 Catalog, tags, manifests.** `[medium | F-0008,F-0013,S-01 | after L1.1]`
+- [x] **L1.2 Catalog, tags, manifests.** `[medium | F-0008,F-0013,S-01 | after L1.1]`
 - [ ] **L1.3 Config blob and delete.** `[medium | F-0012,F-0015,F-0016,F-0017,F-0018,S-01 | after L1.2]`
 - [x] **L1.4 Docker Hub client.** `[medium | F-0007,F-0012,S-01 | after L1.1]`
 - [x] **L1.5 ghcr client.** `[medium | F-0006,F-0012,S-01 | after L1.1]`
@@ -315,4 +315,5 @@ Append at the top; take the next free `D-0NN` at commit time.
 | L1.5 | (see git log --grep '[L1.5]') | pkg/registry/ghcr client: GitHub packages listing (user/org detection, pagination, visibility), version listing, resolve-then-delete + package delete, and ghcr.io registry client helper, by gemini-2 |
 | L2.2 | (see git log --grep '[L2.2]') | saved-connections store (`registries.yml`, mode 0600, no secrets on disk), Docker credential store integration (`secret_owner: lazydocker`), schema docs + L2.1 review follow-ups; review fixes: refuse clobbering pre-existing docker logins (`ErrExternalCredentialExists` / `Options.OverwriteExternal`) and match Docker's own store keys (`https://index.docker.io/v1/` for Hub, existing `auths`/`credHelpers` keys), by gemini |
 | L4.4 | (see git log --grep '[L4.4]') | opt-in multi-select in SideListPanel (toggle, range select, key persistence, title count, row markers, SelectedItems fallback), by gemini-3 |
+| L1.2 | (see git log --grep '[L1.2]') | pkg/registry catalog, tags, manifests (RFC5988 Link pagination, OCI + Docker v2 manifests and multi-arch indexes, digest verification, GetManifestByDigest) + registrytest catalog/tags/manifests fixture + L1.1 credential-scoping review fix (supervised rescue of glm's partial work), by gemini-2 |
 | L1.4 | (see git log --grep '[L1.4]') | pkg/registry/dockerhub client: login JWT + PAT auth, paginated repo/tag listing, PUBLIC/PRIVATE visibility, Validate, tag + repo delete, and origin/scheme/redirect guards (rescued from glm-2 + reviewed/hardened), by gemini |
