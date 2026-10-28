@@ -145,7 +145,7 @@ visibility) plus the ghcr.io OCI bearer flow, and delete via the packages API (r
 package version whose tags contain the target; deleting the version removes all its tags —
 same blast-radius reporting as L1.3).
 
-- [ ] **L1.1 Registry client core.** `[medium | F-0008,S-01,S-07 | after L0.1]`
+- [x] **L1.1 Registry client core.** `[medium | F-0008,S-01,S-07 | after L0.1]`
 - [ ] **L1.2 Catalog, tags, manifests.** `[medium | F-0008,F-0013,S-01 | after L1.1]`
 - [ ] **L1.3 Config blob and delete.** `[medium | F-0012,F-0015,F-0016,F-0017,F-0018,S-01 | after L1.2]`
 - [ ] **L1.4 Docker Hub client.** `[medium | F-0007,F-0012,S-01 | after L1.1]`
@@ -309,3 +309,4 @@ Append at the top; take the next free `D-0NN` at commit time.
 | task | commit | note |
 | --- | --- | --- |
 | L0.1 | ff09ecf | board scaffold + this plan + features.yaml, by glm-flash |
+| L1.1 | (see git log --grep '[L1.1]') | pkg/registry core: transport, ping, basic+bearer auth, token cache, certs.d CAs, http fallback, both credential-refusal rules + registrytest fixture, by glm |

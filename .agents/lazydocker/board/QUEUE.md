@@ -34,7 +34,7 @@ Locks change by the minute — `board.sh` beats this table.
 
 | N | Task |
 | --- | --- |
-| B1 | **L1.1** Registry client core: transport, basic + bearer auth, plain-http/custom CA, ping, first httptest fixture. `[medium \| F-0008, S-01, S-07]` — footprint `pkg/registry/*.go`, `pkg/registry/registrytest/**` |
+| ~~B1~~ | ~~**L1.1** Registry client core: transport, basic + bearer auth, plain-http/custom CA, ping, first httptest fixture.~~ Done 2026-10-28 (glm, see §21). |
 
 ### Light — anyone
 
