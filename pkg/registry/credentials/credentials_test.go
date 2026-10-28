@@ -450,3 +450,172 @@ echo '{"Username":"u","Secret":"s"}'
 		t.Fatalf("helper should not have been executed when context is already canceled")
 	}
 }
+
+func TestIndependentConfigLoadingWhenOneSourceIsMalformed(t *testing.T) {
+	_, dockerDir, _ := isolateEnv(t)
+	podmanPath := filepath.Join(t.TempDir(), "auth.json")
+	t.Setenv("REGISTRY_AUTH_FILE", podmanPath)
+
+	dockerSecret := "MALFORMED_DOCKER_SECRET_111"
+	dockerCfgPath := filepath.Join(dockerDir, "config.json")
+	writeFile(t, dockerCfgPath, fmt.Sprintf(`{"auths": {"ghcr.io": {"auth": "%s"`, dockerSecret), 0o600)
+
+	writeFile(t, podmanPath, fmt.Sprintf(`{
+	"auths": {
+		"quay.io": {"auth": %q}
+	}
+}`, basicAuthB64("podman-user", "podman-pass")), 0o600)
+
+	// Discover should return the valid Podman entry alongside a non-secret error for Docker.
+	sources, err := Discover(DiscoverOptions{})
+	if err == nil {
+		t.Fatalf("expected non-nil error when docker config.json is malformed")
+	}
+	if strings.Contains(err.Error(), dockerSecret) {
+		t.Fatalf("error leaked secret from malformed docker config: %v", err)
+	}
+	if len(sources) != 1 || sources[0].Registry != "quay.io" || sources[0].Username != "podman-user" || sources[0].Source != podmanPath {
+		t.Fatalf("expected Podman source despite malformed docker config, got %+v", sources)
+	}
+
+	// Resolve for quay.io should succeed without error from the healthy Podman file.
+	sec, err := Resolve(context.Background(), "quay.io")
+	if err != nil {
+		t.Fatalf("Resolve(quay.io) failed when docker config was malformed: %v", err)
+	}
+	if sec.Username != "podman-user" || sec.Password != "podman-pass" {
+		t.Fatalf("unexpected credentials from Podman: user=%q", sec.Username)
+	}
+
+	// Resolve for a missing registry should still match ErrNotFound and include the load error without secrets.
+	_, err = Resolve(context.Background(), "missing.example.com")
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound for missing.example.com, got %v", err)
+	}
+	if strings.Contains(err.Error(), dockerSecret) {
+		t.Fatalf("error leaked secret from malformed docker config: %v", err)
+	}
+
+	// Now flip: valid Docker config + malformed Podman auth.json.
+	podmanSecret := "MALFORMED_PODMAN_SECRET_222"
+	writeFile(t, dockerCfgPath, fmt.Sprintf(`{
+	"auths": {
+		"ghcr.io": {"auth": %q}
+	}
+}`, basicAuthB64("docker-user", "docker-pass")), 0o600)
+	writeFile(t, podmanPath, fmt.Sprintf(`{"auths": {"quay.io": {"auth": "%s"`, podmanSecret), 0o600)
+
+	sources, err = Discover(DiscoverOptions{})
+	if err == nil {
+		t.Fatalf("expected non-nil error when podman auth.json is malformed")
+	}
+	if strings.Contains(err.Error(), podmanSecret) {
+		t.Fatalf("error leaked secret from malformed podman auth.json: %v", err)
+	}
+	if len(sources) != 1 || sources[0].Registry != "ghcr.io" || sources[0].Username != "docker-user" || sources[0].Source != dockerCfgPath {
+		t.Fatalf("expected Docker source despite malformed podman auth.json, got %+v", sources)
+	}
+
+	sec, err = Resolve(context.Background(), "ghcr.io")
+	if err != nil {
+		t.Fatalf("Resolve(ghcr.io) failed when podman auth.json was malformed: %v", err)
+	}
+	if sec.Username != "docker-user" || sec.Password != "docker-pass" {
+		t.Fatalf("unexpected credentials from Docker: user=%q", sec.Username)
+	}
+}
+
+func TestResolveCredsStoreExecCountWithAuthsKey(t *testing.T) {
+	_, dockerDir, _ := isolateEnv(t)
+	markerFile := filepath.Join(t.TempDir(), "helper-calls.log")
+
+	installFakeHelper(t, "lazytest", fmt.Sprintf(`
+read -r server
+printf '%%s\n' "$server" >> %q
+case "$server" in
+  "https://index.docker.io/v1/")
+    echo '{"Username":"hubuser","Secret":"hubsecret-123"}'
+    ;;
+  *)
+    echo "credentials not found in native keychain"
+    exit 1
+    ;;
+esac
+`, markerFile))
+
+	countHelperCalls := func() []string {
+		t.Helper()
+		data, err := os.ReadFile(markerFile)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			t.Fatalf("read marker file: %v", err)
+		}
+		trimmed := strings.TrimSpace(string(data))
+		if trimmed == "" {
+			return nil
+		}
+		return strings.Split(trimmed, "\n")
+	}
+
+	// 1. When auths records the key Docker itself wrote ("https://index.docker.io/v1/"),
+	// Resolve("registry-1.docker.io") must invoke the helper ONLY ONCE with that exact key.
+	writeFile(t, filepath.Join(dockerDir, "config.json"), `{
+	"credsStore": "lazytest",
+	"auths": {
+		"https://index.docker.io/v1/": {}
+	}
+}`, 0o600)
+
+	sec, err := Resolve(context.Background(), "registry-1.docker.io")
+	if err != nil {
+		t.Fatalf("Resolve(registry-1.docker.io) failed: %v", err)
+	}
+	if sec.Username != "hubuser" || sec.Password != "hubsecret-123" {
+		t.Fatalf("unexpected secret: user=%q", sec.Username)
+	}
+	calls := countHelperCalls()
+	if len(calls) != 1 || calls[0] != "https://index.docker.io/v1/" {
+		t.Fatalf("expected exactly 1 helper exec for 'https://index.docker.io/v1/', got %d: %v", len(calls), calls)
+	}
+
+	// 2. When auths records a key for a registry whose credential is missing in the helper,
+	// Resolve must still invoke the helper ONLY ONCE (for that recorded auths key) and
+	// NOT fall back to the ~5 alias candidates.
+	_ = os.Remove(markerFile)
+	writeFile(t, filepath.Join(dockerDir, "config.json"), `{
+	"credsStore": "lazytest",
+	"auths": {
+		"index.docker.io": {}
+	}
+}`, 0o600)
+
+	_, err = Resolve(context.Background(), "docker.io")
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound when recorded auths key is not in helper, got %v", err)
+	}
+	calls = countHelperCalls()
+	if len(calls) != 1 || calls[0] != "index.docker.io" {
+		t.Fatalf("expected exactly 1 helper exec for recorded auths key 'index.docker.io', got %d: %v", len(calls), calls)
+	}
+
+	// 3. Only when NO auths key matches does Resolve fall back to the alias list.
+	_ = os.Remove(markerFile)
+	writeFile(t, filepath.Join(dockerDir, "config.json"), `{
+	"credsStore": "lazytest",
+	"auths": {}
+}`, 0o600)
+
+	sec, err = Resolve(context.Background(), "docker.io")
+	if err != nil {
+		t.Fatalf("Resolve(docker.io) without auths key failed to fall back to aliases: %v", err)
+	}
+	if sec.Username != "hubuser" || sec.Password != "hubsecret-123" {
+		t.Fatalf("unexpected secret on alias fallback: user=%q", sec.Username)
+	}
+	calls = countHelperCalls()
+	if len(calls) < 2 {
+		t.Fatalf("expected alias fallback when auths has no matching key, got %v", calls)
+	}
+}
