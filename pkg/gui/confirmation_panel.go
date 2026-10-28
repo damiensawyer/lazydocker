@@ -35,6 +35,12 @@ func (gui *Gui) closeConfirmationPrompt() error {
 	}
 	gui.g.DeleteViewKeybindings("confirmation")
 	gui.Views.Confirmation.Visible = false
+	// Reset the input mask so a masked prompt (e.g. for a secret) does not
+	// leak its masking into the next popup. The buffer is deliberately NOT
+	// cleared here: a prompt panel's confirm callback reads the typed input
+	// after this function returns (see handleCustomCommand). The buffer is
+	// cleared when the next panel opens (see prepareConfirmationPanel).
+	gui.Views.Confirmation.Mask = 0
 	return nil
 }
 
@@ -72,6 +78,24 @@ func (gui *Gui) createPromptPanel(title string, handleConfirm func(*gocui.Gui, *
 	return gui.setKeyBindings(gui.g, handleConfirm, nil)
 }
 
+// createMaskedPromptPanel is the masked-input variant of createPromptPanel:
+// typed characters are rendered as '*' so secrets (e.g. registry passwords)
+// are not echoed to the screen. The mask is reset and the buffer cleared so
+// the next popup neither masks nor shows the secret (see
+// closeConfirmationPrompt and prepareConfirmationPanel).
+// Nothing calls this yet; the registry connection flows (L3.2) will.
+// nolint:unused
+func (gui *Gui) createMaskedPromptPanel(title string, handleConfirm func(*gocui.Gui, *gocui.View) error) error {
+	gui.onNewPopupPanel()
+	err := gui.prepareConfirmationPanel(title, "")
+	if err != nil {
+		return err
+	}
+	gui.Views.Confirmation.Editable = true
+	gui.Views.Confirmation.Mask = '*'
+	return gui.setKeyBindings(gui.g, handleConfirm, nil)
+}
+
 func (gui *Gui) prepareConfirmationPanel(title, prompt string) error {
 	x0, y0, x1, y1 := gui.getConfirmationPanelDimensions(true, prompt)
 	confirmationView := gui.Views.Confirmation
@@ -79,6 +103,10 @@ func (gui *Gui) prepareConfirmationPanel(title, prompt string) error {
 	if err != nil {
 		return err
 	}
+	// Start from an empty buffer so input left behind by a previous prompt
+	// (which may contain a masked secret) is never shown in this popup.
+	// Non-editable popups render their own content after this point.
+	confirmationView.Clear()
 	confirmationView.Title = title
 	confirmationView.Visible = true
 	gui.g.Update(func(g *gocui.Gui) error {
