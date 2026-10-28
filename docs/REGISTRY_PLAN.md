@@ -217,7 +217,7 @@ and must leave every existing panel's behaviour unchanged.
 - [ ] **L4.1 Repository drill-down.** `[medium | F-0009,S-04 | after L3.1]`
 - [ ] **L4.2 Tag list.** `[medium | F-0010,S-03,S-04 | after L4.1 L1.2]`
 - [ ] **L4.3 Copy pull command.** `[medium | F-0019,S-04,S-06 | after L4.2]`
-- [ ] **L4.4 Multi-select in side lists.** `[heavy | F-0012,S-04 | after L0.1]`
+- [x] **L4.4 Multi-select in side lists.** `[heavy | F-0012,S-04 | after L0.1]`
 
 ### Phase L5 — tag details in the main view
 
@@ -312,3 +312,4 @@ Append at the top; take the next free `D-0NN` at commit time.
 | L1.1 | (see git log --grep '[L1.1]') | pkg/registry core: transport, ping, basic+bearer auth, token cache, certs.d CAs, http fallback, both credential-refusal rules + registrytest fixture, by glm |
 | L3.4 | (see git log --grep '[L3.4]') | createMaskedPromptPanel; mask reset + buffer clear on close/open of the confirmation panel, by swift |
 | L2.1 | (see git log --grep '[L2.1]') | docker + podman credential auto-detection and lazy helper resolution, by gemini |
+| L4.4 | (see git log --grep '[L4.4]') | opt-in multi-select in SideListPanel (toggle, range select, key persistence, title count, row markers, SelectedItems fallback), by gemini-3 |
