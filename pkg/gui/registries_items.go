@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/jesseduffield/lazydocker/pkg/registry"
+	"github.com/jesseduffield/lazydocker/pkg/registry/connections"
 	"github.com/jesseduffield/lazydocker/pkg/registry/credentials"
 )
 
@@ -65,9 +66,13 @@ type registryItem struct {
 	SourceFile string
 
 	// AutoDetected marks rows that were read from the user's docker/podman
-	// config rather than saved as connections (saved connections land with
-	// L2.2/L3.2; until then every row is auto-detected).
+	// config rather than saved as connections in registries.yml.
 	AutoDetected bool
+
+	// Connection holds the saved connection metadata from registries.yml when
+	// AutoDetected is false (contains only non-secret fields: Kind, URL,
+	// Username, Insecure, SecretOwner).
+	Connection connections.Connection
 
 	// Status is the row's ping verdict; checking until one lands.
 	Status registryItemStatus

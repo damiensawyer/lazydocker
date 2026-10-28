@@ -2,8 +2,13 @@ package gui
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -13,6 +18,7 @@ import (
 	"github.com/jesseduffield/lazydocker/pkg/config"
 	"github.com/jesseduffield/lazydocker/pkg/i18n"
 	"github.com/jesseduffield/lazydocker/pkg/registry"
+	"github.com/jesseduffield/lazydocker/pkg/registry/connections"
 	"github.com/jesseduffield/lazydocker/pkg/registry/credentials"
 	"github.com/jesseduffield/lazydocker/pkg/registry/registrytest"
 	"github.com/jesseduffield/lazydocker/pkg/tasks"
@@ -96,7 +102,11 @@ func waitUntil(t *testing.T, timeout time.Duration, cond func() bool, msg string
 func TestRegistriesPanelDoesNothingUntilFirstFocus(t *testing.T) {
 	gui := newHeadlessRegistriesTestGui(t)
 
-	var discoverCalls, pingCalls atomic.Int64
+	var storeCalls, discoverCalls, pingCalls atomic.Int64
+	gui.registriesState.storeLoadFn = func() ([]connections.Connection, error) {
+		storeCalls.Add(1)
+		return nil, nil
+	}
 	gui.registriesDiscoverFn = func() ([]credentials.AuthSource, error) {
 		discoverCalls.Add(1)
 		return []credentials.AuthSource{
@@ -116,6 +126,9 @@ func TestRegistriesPanelDoesNothingUntilFirstFocus(t *testing.T) {
 		t.Fatalf("RerenderList: %s", err)
 	}
 
+	if got := storeCalls.Load(); got != 0 {
+		t.Fatalf("Store.List called %d time(s) before the panel was focused; want 0 (D-09)", got)
+	}
 	if got := discoverCalls.Load(); got != 0 {
 		t.Fatalf("Discover called %d time(s) before the panel was focused; want 0 (D-09)", got)
 	}
@@ -123,10 +136,12 @@ func TestRegistriesPanelDoesNothingUntilFirstFocus(t *testing.T) {
 		t.Fatalf("ping called %d time(s) before the panel was focused; want 0 (D-09)", got)
 	}
 
-	// first focus: one discovery, then one ping per auth source
+	// first focus: one store read, one discovery, then one ping per auth source
 	if err := gui.switchFocus(gui.Views.Registries); err != nil {
 		t.Fatalf("switchFocus to registries: %s", err)
 	}
+	waitUntil(t, 5*time.Second, func() bool { return storeCalls.Load() == 1 },
+		"first focus must read the saved-connections store exactly once")
 	waitUntil(t, 5*time.Second, func() bool { return discoverCalls.Load() == 1 },
 		"first focus must run credential discovery exactly once")
 	waitUntil(t, 5*time.Second, func() bool { return pingCalls.Load() == 2 },
@@ -140,14 +155,19 @@ func TestRegistriesPanelDoesNothingUntilFirstFocus(t *testing.T) {
 		t.Fatalf("switchFocus back: %s", err)
 	}
 	time.Sleep(50 * time.Millisecond)
+	if got := storeCalls.Load(); got != 1 {
+		t.Fatalf("refocus re-read saved connections (%d calls); only the refresh key should", got)
+	}
 	if got := discoverCalls.Load(); got != 1 {
 		t.Fatalf("refocus re-ran discovery (%d calls); only the refresh key should", got)
 	}
 
-	// pressing 'r' (handleRegistriesRefresh) must re-run discovery and ping
+	// pressing 'r' (handleRegistriesRefresh) must re-run store read, discovery and ping
 	if err := gui.handleRegistriesRefresh(gui.g, gui.Views.Registries); err != nil {
 		t.Fatalf("handleRegistriesRefresh: %s", err)
 	}
+	waitUntil(t, 5*time.Second, func() bool { return storeCalls.Load() == 2 },
+		"refresh key must re-read the saved-connections store")
 	waitUntil(t, 5*time.Second, func() bool { return discoverCalls.Load() == 2 },
 		"refresh key must re-run credential discovery")
 	waitUntil(t, 5*time.Second, func() bool { return pingCalls.Load() == 4 },
@@ -393,7 +413,7 @@ func TestRegistriesPanelVisibilityFollowsConfig(t *testing.T) {
 func TestRegistriesKeybindingsRegistered(t *testing.T) {
 	gui := newHeadlessRegistriesTestGui(t)
 
-	var hasFocusKey, hasRefreshKey bool
+	var hasFocusKey, hasRefreshKey, hasAddKey, hasEditKey, hasDeleteKey bool
 	for _, b := range gui.GetInitialKeybindings() {
 		if b.Key == '7' && b.Description == gui.Tr.FocusRegistries {
 			hasFocusKey = true
@@ -401,12 +421,30 @@ func TestRegistriesKeybindingsRegistered(t *testing.T) {
 		if b.ViewName == "registries" && b.Key == 'r' && b.Description == gui.Tr.RefreshRegistries {
 			hasRefreshKey = true
 		}
+		if b.ViewName == "registries" && b.Key == 'n' && b.Description == gui.Tr.AddRegistryConnection {
+			hasAddKey = true
+		}
+		if b.ViewName == "registries" && b.Key == 'e' && b.Description == gui.Tr.EditRegistryConnection {
+			hasEditKey = true
+		}
+		if b.ViewName == "registries" && b.Key == 'd' && b.Description == gui.Tr.DeleteRegistryConnection {
+			hasDeleteKey = true
+		}
 	}
 	if !hasFocusKey {
 		t.Fatal("no '7' binding to focus the registries panel")
 	}
 	if !hasRefreshKey {
 		t.Fatal("no 'r' refresh binding on the registries panel")
+	}
+	if !hasAddKey {
+		t.Fatal("no 'n' add binding on the registries panel")
+	}
+	if !hasEditKey {
+		t.Fatal("no 'e' edit binding on the registries panel")
+	}
+	if !hasDeleteKey {
+		t.Fatal("no 'd' delete binding on the registries panel")
 	}
 }
 
@@ -445,4 +483,538 @@ func TestGetRegistriesDisplayStrings(t *testing.T) {
 			t.Fatalf("summary missing %q:\n%s", want, summary)
 		}
 	}
+}
+
+// setupTestConnectionStore attaches a saved-connections Store backed by
+// temporary ConfigDir and DockerConfigDir so tests never touch ~/.docker or
+// ~/.config/lazydocker.
+func setupTestConnectionStore(t *testing.T, gui *Gui) (*connections.Store, string, string) {
+	// Headless: no event loop runs, so popups must open synchronously.
+	gui.uiUpdate = func(f func(*gocui.Gui) error) { _ = f(gui.g) }
+	t.Helper()
+	configDir := t.TempDir()
+	dockerDir := t.TempDir()
+	gui.Config.ConfigDir = configDir
+	store := connections.NewStoreWithOptions(connections.Options{
+		ConfigDir:       configDir,
+		DockerConfigDir: dockerDir,
+		DiscoverOptions: credentials.DiscoverOptions{
+			DockerConfigDir: dockerDir,
+			HomeDir:         t.TempDir(),
+		},
+	})
+	gui.registriesState.store = store
+	gui.registriesDiscoverFn = func() ([]credentials.AuthSource, error) {
+		return nil, nil
+	}
+	gui.registriesPingFn = func(ctx context.Context, host string) (registry.PingResult, error) {
+		return registry.PingResult{Status: registry.StatusOnline, Duration: time.Millisecond}, nil
+	}
+	return store, configDir, dockerDir
+}
+
+func confirmCurrentPopup(t *testing.T, gui *Gui) {
+	t.Helper()
+	fn := gui.popupBindings.confirm
+	if fn == nil {
+		t.Fatal("no active confirmation callback bound on the confirmation view")
+	}
+	if err := fn(gui.g, gui.Views.Confirmation); err != nil {
+		t.Fatalf("confirming popup: %s", err)
+	}
+}
+
+func setPromptInput(v *gocui.View, text string) {
+	v.ClearTextArea()
+	_, _ = v.Write([]byte(text))
+}
+
+// Saved connections merged with auto-detected sources: a host present in both
+// appears once as saved (AutoDetected: false, no "(auto)" suffix).
+func TestMergeRegistryItemsSavedAndAutoDetected(t *testing.T) {
+	gui := newHeadlessRegistriesTestGui(t)
+
+	saved := []connections.Connection{
+		{Kind: connections.KindDockerHub, URL: "https://index.docker.io/v1/", Username: "saved-hub"},
+		{Kind: connections.KindGHCR, URL: "ghcr.io", Username: ""},
+		{Kind: connections.KindRegistry, URL: "registry.internal:5000", Username: "ops"},
+	}
+	sources := []credentials.AuthSource{
+		{Registry: "docker.io", Username: "auto-hub", Source: "/tmp/docker/config.json"},
+		{Registry: "ghcr.io", Username: "octocat", Source: "/tmp/docker/config.json"},
+		{Registry: "quay.io", Username: "quayuser", Source: "/tmp/containers/auth.json"},
+	}
+
+	items := mergeRegistryItems(saved, "/tmp/lazydocker/registries.yml", sources)
+	if len(items) != 4 {
+		t.Fatalf("merged %d items; want 4 (docker.io, ghcr.io, registry.internal:5000, quay.io)", len(items))
+	}
+
+	byHost := make(map[string]*registryItem, len(items))
+	for _, it := range items {
+		if _, dup := byHost[it.Host]; dup {
+			t.Fatalf("duplicate host %q in merged items", it.Host)
+		}
+		byHost[it.Host] = it
+	}
+
+	// docker.io is in both: shows once as saved, keeps saved username, no (auto) suffix
+	hub := byHost["docker.io"]
+	if hub == nil {
+		t.Fatal("missing docker.io")
+	}
+	if hub.AutoDetected {
+		t.Fatal("docker.io is in saved connections; AutoDetected must be false")
+	}
+	if hub.Username != "saved-hub" {
+		t.Fatalf("docker.io username = %q; want %q", hub.Username, "saved-hub")
+	}
+	if got := gui.registriesHostDisplay(hub); got != "docker.io" {
+		t.Fatalf("saved row display = %q; want %q (no auto suffix)", got, "docker.io")
+	}
+
+	// ghcr.io is in both with empty saved username: stays saved, inherits discovered username for display
+	ghcr := byHost["ghcr.io"]
+	if ghcr == nil {
+		t.Fatal("missing ghcr.io")
+	}
+	if ghcr.AutoDetected {
+		t.Fatal("ghcr.io is in saved connections; AutoDetected must be false")
+	}
+	if ghcr.Username != "octocat" {
+		t.Fatalf("ghcr.io username = %q; want %q (inherited from auto source)", ghcr.Username, "octocat")
+	}
+	if got := gui.registriesHostDisplay(ghcr); got != "ghcr.io" {
+		t.Fatalf("saved ghcr display = %q; want %q (no auto suffix)", got, "ghcr.io")
+	}
+
+	// quay.io is only in auto-detected: AutoDetected is true, has (auto) suffix
+	quay := byHost["quay.io"]
+	if quay == nil {
+		t.Fatal("missing quay.io")
+	}
+	if !quay.AutoDetected {
+		t.Fatal("quay.io is auto-detected only; AutoDetected must be true")
+	}
+	if want := "quay.io " + gui.Tr.RegistriesAutoDetectedSuffix; gui.registriesHostDisplay(quay) != want {
+		t.Fatalf("auto row display = %q; want %q", gui.registriesHostDisplay(quay), want)
+	}
+}
+
+// Opus L3.1 review fix: after applyRegistriesRefresh, if the registries panel
+// is the current view, HandleSelect must run immediately so the main view does
+// not stay empty until the cursor moves.
+func TestApplyRegistriesRefreshSelectsCurrentView(t *testing.T) {
+	gui := newHeadlessRegistriesTestGui(t)
+	gui.registriesDiscoverFn = func() ([]credentials.AuthSource, error) {
+		return nil, nil
+	}
+	if err := gui.switchFocus(gui.Views.Registries); err != nil {
+		t.Fatalf("switchFocus: %s", err)
+	}
+	gui.State.Panels.Main.ObjectKey = ""
+
+	gen := gui.registriesState.beginRefresh()
+	item := &registryItem{
+		Kind:     registryKindRegistry,
+		Host:     "ghcr.io",
+		Username: "alice",
+		Status:   registryItemStatusOnline,
+	}
+	gui.applyRegistriesRefresh(gen, []*registryItem{item})
+
+	if !strings.Contains(gui.State.Panels.Main.ObjectKey, "registries-ghcr.io-") {
+		t.Fatalf("Main.ObjectKey = %q after applyRegistriesRefresh on focused registries view; want HandleSelect to populate it immediately", gui.State.Panels.Main.ObjectKey)
+	}
+}
+
+// Opus L3.4 review fix: prepareConfirmationPanel and createMaskedPromptPanel
+// must reset cursor and origin to (0, 0) so input in a masked prompt never
+// starts at a stale column left by a previous (e.g. prefilled) prompt.
+func TestMaskedPromptResetsStaleCursorAndOrigin(t *testing.T) {
+	gui := newHeadlessRegistriesTestGui(t)
+
+	// Open a prefilled prompt first so the confirmation view has a non-zero cursor
+	if err := gui.createPrefilledPromptPanel("Username:", "long-prefilled-username", nil); err != nil {
+		t.Fatalf("createPrefilledPromptPanel: %s", err)
+	}
+	_ = gui.Views.Confirmation.SetCursor(10, 0)
+	_ = gui.Views.Confirmation.SetOrigin(4, 0)
+
+	if err := gui.createMaskedPromptPanel("Password:", nil); err != nil {
+		t.Fatalf("createMaskedPromptPanel: %s", err)
+	}
+
+	cx, cy := gui.Views.Confirmation.Cursor()
+	ox, oy := gui.Views.Confirmation.Origin()
+	if cx != 0 || cy != 0 {
+		t.Fatalf("masked prompt Cursor = (%d, %d); want (0, 0)", cx, cy)
+	}
+	if ox != 0 || oy != 0 {
+		t.Fatalf("masked prompt Origin = (%d, %d); want (0, 0)", ox, oy)
+	}
+	if got := gui.Views.Confirmation.Buffer(); got != "" {
+		t.Fatalf("masked prompt Buffer = %q; want empty", got)
+	}
+	if got := gui.Views.Confirmation.Mask; got != '*' {
+		t.Fatalf("masked prompt Mask = %q; want '*'", got)
+	}
+}
+
+// Add connection flow: menu for kind -> prefilled URL -> username -> masked
+// secret (read RAW, preserving leading/trailing spaces, minus only trailing
+// newline) -> Store.Create.
+func TestAddRegistryConnectionFlow(t *testing.T) {
+	gui := newHeadlessRegistriesTestGui(t)
+	store, _, _ := setupTestConnectionStore(t, gui)
+
+	// 1. Press 'n' on the registries panel -> kind menu opens
+	if err := gui.handleAddRegistryConnection(gui.g, gui.Views.Registries); err != nil {
+		t.Fatalf("handleAddRegistryConnection: %s", err)
+	}
+	if !gui.Views.Menu.Visible {
+		t.Fatal("kind menu should be visible after 'n'")
+	}
+
+	// Select GHCR (index 2: 0=registry, 1=dockerhub, 2=ghcr)
+	gui.Panels.Menu.SetSelectedLineIdx(2)
+	if err := gui.handleMenuPress(); err != nil {
+		t.Fatalf("handleMenuPress: %s", err)
+	}
+
+	// 2. URL prompt opens, prefilled with "ghcr.io"
+	if !gui.Views.Confirmation.Visible || gui.Views.Confirmation.Title != gui.Tr.RegistryURLPromptTitle {
+		t.Fatalf("expected URL prompt, got visible=%v title=%q", gui.Views.Confirmation.Visible, gui.Views.Confirmation.Title)
+	}
+	if got := gui.trimmedContent(gui.Views.Confirmation); got != "ghcr.io" {
+		t.Fatalf("GHCR URL prompt prefill = %q; want %q", got, "ghcr.io")
+	}
+	confirmCurrentPopup(t, gui)
+
+	// 3. Username prompt opens
+	if gui.Views.Confirmation.Title != gui.Tr.RegistryUsernamePromptTitle {
+		t.Fatalf("expected username prompt, got title=%q", gui.Views.Confirmation.Title)
+	}
+	setPromptInput(gui.Views.Confirmation, "octocat")
+	confirmCurrentPopup(t, gui)
+
+	// 4. Masked secret prompt opens with Mask='*' and cursor/origin at (0, 0)
+	if gui.Views.Confirmation.Title != gui.Tr.RegistrySecretPromptTitle {
+		t.Fatalf("expected secret prompt, got title=%q", gui.Views.Confirmation.Title)
+	}
+	if gui.Views.Confirmation.Mask != '*' {
+		t.Fatalf("secret prompt Mask = %q; want '*'", gui.Views.Confirmation.Mask)
+	}
+	cx, cy := gui.Views.Confirmation.Cursor()
+	if cx != 0 || cy != 0 {
+		t.Fatalf("secret prompt Cursor = (%d, %d); want (0, 0)", cx, cy)
+	}
+
+	// Secret with significant leading/trailing spaces and a trailing newline
+	rawSecretWithSpaces := "  ghp_secret_with_spaces  "
+	setPromptInput(gui.Views.Confirmation, rawSecretWithSpaces+"\n")
+	confirmCurrentPopup(t, gui)
+
+	// Verify connection saved in registries.yml without secret
+	saved, err := store.List()
+	if err != nil {
+		t.Fatalf("store.List: %s", err)
+	}
+	if len(saved) != 1 {
+		t.Fatalf("saved connections = %d; want 1", len(saved))
+	}
+	if saved[0].Kind != connections.KindGHCR || saved[0].URL != "ghcr.io" || saved[0].Username != "octocat" {
+		t.Fatalf("unexpected saved connection: %+v", saved[0])
+	}
+	if saved[0].SecretOwner != connections.SecretOwnerLazydocker {
+		t.Fatalf("SecretOwner = %q; want %q", saved[0].SecretOwner, connections.SecretOwnerLazydocker)
+	}
+
+	// Verify the secret was stored RAW (preserving leading & trailing spaces)
+	resolved, err := store.ResolveSecret(context.Background(), saved[0])
+	if err != nil {
+		t.Fatalf("ResolveSecret: %s", err)
+	}
+	if resolved.Password != rawSecretWithSpaces {
+		t.Fatalf("stored secret = %q; want %q (leading/trailing spaces must be preserved, only trailing newline stripped)", resolved.Password, rawSecretWithSpaces)
+	}
+}
+
+// Edit connection flow: refused for auto-detected rows; for saved rows,
+// prefilled chain where empty secret keeps existing credential and non-empty
+// secret updates it.
+func TestEditRegistryConnectionFlow(t *testing.T) {
+	gui := newHeadlessRegistriesTestGui(t)
+	store, _, _ := setupTestConnectionStore(t, gui)
+
+	// 1. Editing an auto-detected row is refused
+	autoItem := &registryItem{
+		Kind:         registryKindRegistry,
+		Host:         "docker.io",
+		Username:     "autouser",
+		AutoDetected: true,
+	}
+	gui.Panels.Registries.SetItems([]*registryItem{autoItem})
+	if err := gui.handleEditRegistryConnection(gui.g, gui.Views.Registries); err != nil {
+		t.Fatalf("handleEditRegistryConnection on auto row: %s", err)
+	}
+	if gui.Views.Menu.Visible {
+		t.Fatal("edit menu must not open for an auto-detected row")
+	}
+	if !strings.Contains(gui.trimmedContent(gui.Views.Confirmation), gui.Tr.CannotEditAutoDetectedRegistry) {
+		t.Fatalf("expected CannotEditAutoDetectedRegistry error panel, got %q", gui.trimmedContent(gui.Views.Confirmation))
+	}
+	_ = gui.closeConfirmationPrompt()
+
+	// 2. Seed a saved connection with an initial secret
+	initialConn := connections.Connection{
+		Kind:     connections.KindRegistry,
+		URL:      "registry.example.com:5000",
+		Username: "alice",
+	}
+	if err := store.Create(initialConn, credentials.Secret{Username: "alice", Password: "initial-password"}); err != nil {
+		t.Fatalf("store.Create: %s", err)
+	}
+
+	savedItem := &registryItem{
+		Kind:         registryKindRegistry,
+		Host:         "registry.example.com:5000",
+		Username:     "alice",
+		AutoDetected: false,
+		Connection:   initialConn,
+	}
+	gui.Panels.Registries.SetItems([]*registryItem{savedItem})
+
+	// Press 'e' -> kind menu opens, confirm existing kind
+	if err := gui.handleEditRegistryConnection(gui.g, gui.Views.Registries); err != nil {
+		t.Fatalf("handleEditRegistryConnection: %s", err)
+	}
+	if err := gui.handleMenuPress(); err != nil {
+		t.Fatalf("handleMenuPress: %s", err)
+	}
+
+	// URL prompt is prefilled with existing URL
+	if got := gui.trimmedContent(gui.Views.Confirmation); got != "registry.example.com:5000" {
+		t.Fatalf("edit URL prefill = %q; want %q", got, "registry.example.com:5000")
+	}
+	confirmCurrentPopup(t, gui)
+
+	// Username prompt is prefilled with "alice"; change it to "bob"
+	if got := gui.trimmedContent(gui.Views.Confirmation); got != "alice" {
+		t.Fatalf("edit username prefill = %q; want %q", got, "alice")
+	}
+	setPromptInput(gui.Views.Confirmation, "bob")
+	confirmCurrentPopup(t, gui)
+
+	// Secret prompt is empty; leave it empty to keep existing password
+	if got := gui.Views.Confirmation.Buffer(); got != "" {
+		t.Fatalf("edit secret prompt must start empty, got %q", got)
+	}
+	confirmCurrentPopup(t, gui)
+
+	updated, err := store.Get("registry.example.com:5000")
+	if err != nil {
+		t.Fatalf("store.Get: %s", err)
+	}
+	if updated.Username != "bob" {
+		t.Fatalf("updated Username = %q; want %q", updated.Username, "bob")
+	}
+	resolved, err := store.ResolveSecret(context.Background(), updated)
+	if err != nil {
+		t.Fatalf("ResolveSecret after empty-secret edit: %s", err)
+	}
+	if resolved.Password != "initial-password" {
+		t.Fatalf("empty secret prompt must keep existing password, got %q", resolved.Password)
+	}
+}
+
+// Delete connection flow: refused for auto-detected rows; confirmation panel
+// then Store.Delete for saved rows.
+func TestDeleteRegistryConnectionRefusesAutoAndDeletesSaved(t *testing.T) {
+	gui := newHeadlessRegistriesTestGui(t)
+	store, _, _ := setupTestConnectionStore(t, gui)
+
+	if err := store.Create(connections.Connection{
+		Kind:     connections.KindGHCR,
+		URL:      "ghcr.io",
+		Username: "alice",
+	}, credentials.Secret{Username: "alice", Password: "secret-to-delete"}); err != nil {
+		t.Fatalf("store.Create: %s", err)
+	}
+
+	autoItem := &registryItem{
+		Kind:         registryKindRegistry,
+		Host:         "docker.io",
+		Username:     "user",
+		AutoDetected: true,
+	}
+	savedItem := &registryItem{
+		Kind:         registryKindRegistry,
+		Host:         "ghcr.io",
+		Username:     "alice",
+		AutoDetected: false,
+		Connection:   connections.Connection{Kind: connections.KindGHCR, URL: "ghcr.io", Username: "alice"},
+	}
+	gui.Panels.Registries.SetItems([]*registryItem{autoItem, savedItem})
+	gui.Panels.Registries.SetSelectedLineIdx(0) // docker.io (auto)
+
+	// 1. Pressing 'd' on auto-detected row shows error and does NOT delete
+	if err := gui.handleDeleteRegistryConnection(gui.g, gui.Views.Registries); err != nil {
+		t.Fatalf("handleDeleteRegistryConnection on auto row: %s", err)
+	}
+	if gui.Views.Confirmation.Title != gui.Tr.ErrorTitle {
+		t.Fatalf("Confirmation.Title = %q; want %q (error panel, not delete confirmation)", gui.Views.Confirmation.Title, gui.Tr.ErrorTitle)
+	}
+	if !strings.Contains(gui.trimmedContent(gui.Views.Confirmation), gui.Tr.CannotDeleteAutoDetectedRegistry) {
+		t.Fatalf("Confirmation content = %q; want it to contain %q", gui.trimmedContent(gui.Views.Confirmation), gui.Tr.CannotDeleteAutoDetectedRegistry)
+	}
+	_ = gui.closeConfirmationPrompt()
+
+	// 2. Select saved row (ghcr.io) and press 'd' -> confirmation panel -> confirm -> deleted
+	gui.Panels.Registries.SetSelectedLineIdx(1)
+	if err := gui.handleDeleteRegistryConnection(gui.g, gui.Views.Registries); err != nil {
+		t.Fatalf("handleDeleteRegistryConnection on saved row: %s", err)
+	}
+	if gui.Views.Confirmation.Title != gui.Tr.DeleteRegistryConnectionTitle {
+		t.Fatalf("Confirmation.Title = %q; want %q", gui.Views.Confirmation.Title, gui.Tr.DeleteRegistryConnectionTitle)
+	}
+	confirmCurrentPopup(t, gui)
+
+	remaining, err := store.List()
+	if err != nil {
+		t.Fatalf("store.List: %s", err)
+	}
+	if len(remaining) != 0 {
+		t.Fatalf("remaining saved connections = %d; want 0", len(remaining))
+	}
+}
+
+// On ErrExternalCredentialExists: tell the user their existing docker login
+// will be used, and save the connection without overwriting the secret.
+func TestRegistryConnectionExternalCredentialExists(t *testing.T) {
+	gui := newHeadlessRegistriesTestGui(t)
+	store, _, dockerDir := setupTestConnectionStore(t, gui)
+
+	// Pre-populate docker config.json with an existing login for ghcr.io
+	existingAuth := base64.StdEncoding.EncodeToString([]byte("existing-user:existing-token"))
+	configJSON := fmt.Sprintf(`{"auths":{"ghcr.io":{"auth":%q}}}`, existingAuth)
+	if err := os.WriteFile(filepath.Join(dockerDir, "config.json"), []byte(configJSON), 0o600); err != nil {
+		t.Fatalf("writing config.json: %s", err)
+	}
+
+	// Run Add flow for ghcr.io with a new secret
+	if err := gui.handleAddRegistryConnection(gui.g, gui.Views.Registries); err != nil {
+		t.Fatalf("handleAddRegistryConnection: %s", err)
+	}
+	gui.Panels.Menu.SetSelectedLineIdx(2) // GHCR
+	if err := gui.handleMenuPress(); err != nil {
+		t.Fatalf("handleMenuPress: %s", err)
+	}
+	confirmCurrentPopup(t, gui) // URL ("ghcr.io")
+	setPromptInput(gui.Views.Confirmation, "new-user")
+	confirmCurrentPopup(t, gui) // Username
+	setPromptInput(gui.Views.Confirmation, "attempted-overwrite-secret")
+	confirmCurrentPopup(t, gui) // Secret -> triggers ErrExternalCredentialExists
+
+	// User is informed that their existing docker login will be used
+	if gui.Views.Confirmation.Title != gui.Tr.RegistryExternalCredentialTitle {
+		t.Fatalf("Confirmation.Title = %q; want %q", gui.Views.Confirmation.Title, gui.Tr.RegistryExternalCredentialTitle)
+	}
+	if got := gui.trimmedContent(gui.Views.Confirmation); got != gui.Tr.RegistryExternalCredentialMessage {
+		t.Fatalf("Confirmation message = %q; want %q", got, gui.Tr.RegistryExternalCredentialMessage)
+	}
+
+	// Connection is saved in registries.yml without SecretOwner
+	saved, err := store.Get("ghcr.io")
+	if err != nil {
+		t.Fatalf("store.Get(ghcr.io): %s", err)
+	}
+	if saved.SecretOwner != "" {
+		t.Fatalf("SecretOwner = %q; want empty (external credential must not be claimed)", saved.SecretOwner)
+	}
+
+	// Existing credential in config.json is untouched
+	resolved, err := store.ResolveSecret(context.Background(), saved)
+	if err != nil {
+		t.Fatalf("ResolveSecret: %s", err)
+	}
+	if resolved.Password != "existing-token" {
+		t.Fatalf("resolved password = %q; want %q (pre-existing login must stay intact)", resolved.Password, "existing-token")
+	}
+}
+
+type logCaptureHook struct {
+	mu      sync.Mutex
+	entries []string
+}
+
+func (h *logCaptureHook) Levels() []logrus.Level {
+	return logrus.AllLevels
+}
+
+func (h *logCaptureHook) Fire(entry *logrus.Entry) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	line, _ := entry.String()
+	h.entries = append(h.entries, entry.Message, line, fmt.Sprintf("%+v", entry.Data))
+	return nil
+}
+
+func (h *logCaptureHook) contains(sub string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, s := range h.entries {
+		if strings.Contains(s, sub) {
+			return true
+		}
+	}
+	return false
+}
+
+// Security contract: the secret typed into the masked prompt must never reach
+// gui.Log, registries.yml, or remain in the confirmation view buffer.
+func TestRegistryCRUDNeverLogsSecret(t *testing.T) {
+	gui := newHeadlessRegistriesTestGui(t)
+	store, configDir, _ := setupTestConnectionStore(t, gui)
+
+	hook := &logCaptureHook{}
+	gui.Log.Logger.AddHook(hook)
+
+	const sentinelSecret = "NEVER-LOG-THIS-SECRET-TOKEN-998877"
+
+	// 1. Add connection with sentinelSecret
+	if err := gui.handleAddRegistryConnection(gui.g, gui.Views.Registries); err != nil {
+		t.Fatalf("handleAddRegistryConnection: %s", err)
+	}
+	if err := gui.handleMenuPress(); err != nil { // Generic registry
+		t.Fatalf("handleMenuPress: %s", err)
+	}
+	setPromptInput(gui.Views.Confirmation, "registry.private.local:5000")
+	confirmCurrentPopup(t, gui)
+	setPromptInput(gui.Views.Confirmation, "deployer")
+	confirmCurrentPopup(t, gui)
+	setPromptInput(gui.Views.Confirmation, sentinelSecret)
+	confirmCurrentPopup(t, gui)
+
+	// 2. Also trigger a duplicate-host failure path with the same sentinelSecret
+	_ = gui.saveNewRegistryConnection(connections.Connection{
+		Kind:     connections.KindRegistry,
+		URL:      "registry.private.local:5000",
+		Username: "deployer",
+	}, credentials.Secret{Username: "deployer", Password: sentinelSecret})
+
+	if hook.contains(sentinelSecret) {
+		t.Fatal("secret leaked into gui.Log")
+	}
+	if strings.Contains(gui.Views.Confirmation.Buffer(), sentinelSecret) {
+		t.Fatal("secret remained in confirmation view buffer after masked prompt completed")
+	}
+	ymlBytes, err := os.ReadFile(filepath.Join(configDir, connections.FileName))
+	if err != nil {
+		t.Fatalf("reading registries.yml: %s", err)
+	}
+	if strings.Contains(string(ymlBytes), sentinelSecret) {
+		t.Fatal("secret leaked into registries.yml")
+	}
+	_ = store
 }

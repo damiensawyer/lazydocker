@@ -64,6 +64,16 @@ type Gui struct {
 	// ~/.docker, a credential helper, or the network.
 	registriesDiscoverFn func() ([]credentials.AuthSource, error)
 	registriesPingFn     func(ctx context.Context, host string) (registry.PingResult, error)
+
+	// uiUpdate, when set, replaces g.Update in runOnUIThread (tests only).
+	uiUpdate func(func(*gocui.Gui) error)
+	// popupBindings holds the confirm/close handlers bound to the open popup.
+	popupBindings popupBindings
+}
+
+type popupBindings struct {
+	confirm func(*gocui.Gui, *gocui.View) error
+	close   func(*gocui.Gui, *gocui.View) error
 }
 
 type Panels struct {
