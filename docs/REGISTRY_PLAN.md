@@ -148,7 +148,7 @@ same blast-radius reporting as L1.3).
 - [x] **L1.1 Registry client core.** `[medium | F-0008,S-01,S-07 | after L0.1]`
 - [x] **L1.2 Catalog, tags, manifests.** `[medium | F-0008,F-0013,S-01 | after L1.1]`
 - [x] **L1.3 Config blob and delete.** `[medium | F-0012,F-0015,F-0016,F-0017,F-0018,S-01 | after L1.2]`
-- [ ] **L1.4 Docker Hub client.** `[medium | F-0007,F-0012,S-01 | after L1.1]`
+- [x] **L1.4 Docker Hub client.** `[medium | F-0007,F-0012,S-01 | after L1.1]`
 - [x] **L1.5 ghcr client.** `[medium | F-0006,F-0012,S-01 | after L1.1]`
 
 ### Phase L2 — credentials & saved connections
@@ -260,7 +260,7 @@ status lines collapsed in place) as a `pkg/tasks` task in the main view; on comp
 Images panel refreshes and the image is in it. L7.2: pull-if-missing, then create via the
 custom-command preset; the container lands in the Containers panel.
 
-- [ ] **L7.1 Pull a remote tag.** ⚠️ `[heavy | F-0022,S-02,S-03 | after L5.1 L2.1]`
+- [ ] **L7.1 Pull a remote tag.** [partial] ⚠️ `[heavy | F-0022,S-02,S-03 | after L5.1 L2.1]`
 - [ ] **L7.2 Create container from a remote tag.** `[medium | F-0023,S-03 | after L7.1]`
 
 ### Phase L8 — polish & gate
@@ -317,4 +317,6 @@ Append at the top; take the next free `D-0NN` at commit time.
 | L4.4 | (see git log --grep '[L4.4]') | opt-in multi-select in SideListPanel (toggle, range select, key persistence, title count, row markers, SelectedItems fallback), by gemini-3 |
 | L1.2 | (see git log --grep '[L1.2]') | pkg/registry catalog, tags, manifests (RFC5988 Link pagination, OCI + Docker v2 manifests and multi-arch indexes, digest verification, GetManifestByDigest) + registrytest catalog/tags/manifests fixture + L1.1 credential-scoping review fix (supervised rescue of glm's partial work), by gemini-2 |
 | L3.1 | (see git log --grep '[L3.1]') | Registries side panel (`SideListPanel[*registryItem]`), lazy first-focus discovery + async per-registry ping with generation counter, `registries.enabled` config, summary main tab, and i18n keys (rescued from glm-3), by gemini-3 |
+| L1.4 | (see git log --grep '[L1.4]') | pkg/registry/dockerhub client: login JWT + PAT auth, paginated repo/tag listing, PUBLIC/PRIVATE visibility, Validate, tag + repo delete, and origin/scheme/redirect guards (rescued from glm-2 + reviewed/hardened), by gemini |
+| L7.1 | (see git log --grep '[L7.1]') | pkg/commands PullImage (partial: commands layer): reference.ParseNormalizedNamed validation, auth ServerAddress/domain matching (including Docker Hub aliases), base64url RegistryAuth encoding with error scrubbing, ImagePull JSON stream decoding, and FoldPullProgress in-place layer folding, by gemini |
 | L1.3 | (see git log --grep '[L1.3]') | pkg/registry tag details (config blob fetch + digest verification, index platform resolution, layers + total size), TagsSharingDigest, DeleteManifest (typed ErrDeleteUnsupported / 401 / 403 / 404) + registrytest blobs/redirect/delete fixture, by gemini-2 |
