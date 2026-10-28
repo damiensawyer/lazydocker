@@ -40,7 +40,7 @@ Locks change by the minute — `board.sh` beats this table.
 
 | N | Task |
 | --- | --- |
-| C1 | **L3.4** Masked prompt (`createMaskedPromptPanel`, gocui `View.Mask`). `[light \| S-04]` — footprint `pkg/gui/confirmation_panel.go`, `pkg/gui/confirmation_panel_test.go` |
+| ~~C1~~ | **L3.4** Masked prompt (`createMaskedPromptPanel`, gocui `View.Mask`). `[light \| S-04]` — landed (swift) |
 
 ## Next — NOT takeable until the named rows land
 

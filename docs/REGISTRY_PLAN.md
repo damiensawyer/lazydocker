@@ -195,7 +195,7 @@ string through `pkg/i18n` and renders status strings and durations per the optio
 conventions.
 
 - [ ] **L3.1 Registries panel.** `[medium | F-0001,F-0020,S-03,S-04 | after L1.1 L2.1]`
-- [ ] **L3.4 Masked prompt input.** `[light | S-04 | after L0.1]`
+- [x] **L3.4 Masked prompt input.** `[light | S-04 | after L0.1]`
 - [ ] **L3.2 Connection CRUD flows.** ⚠️ `[heavy | F-0002,F-0003,F-0004,S-04 | after L3.1 L3.4 L2.2]`
 - [ ] **L3.3 Status rendering and i18n.** `[light | F-0001,F-0021,S-06 | after L3.1]`
 
@@ -309,3 +309,4 @@ Append at the top; take the next free `D-0NN` at commit time.
 | task | commit | note |
 | --- | --- | --- |
 | L0.1 | ff09ecf | board scaffold + this plan + features.yaml, by glm-flash |
+| L3.4 | (see git log --grep '[L3.4]') | createMaskedPromptPanel; mask reset + buffer clear on close/open of the confirmation panel, by swift |
