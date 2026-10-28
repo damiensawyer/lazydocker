@@ -16,6 +16,13 @@
 // matching `docker login` behaviour, and the connection entry in
 // `registries.yml` records `secret_owner: lazydocker`.
 //
+// If the Docker credential store already holds a credential for that registry
+// that was not written by lazydocker (`secret_owner` is not `"lazydocker"`),
+// saving a connection with a secret refuses with `ErrExternalCredentialExists`
+// unless `Options.OverwriteExternal` is true (in which case the credential is
+// overwritten in the store, but `secret_owner` is left empty so `Store.Delete`
+// never erases it).
+//
 // When a connection is deleted via `Store.Delete`, its credential store entry
 // is erased ONLY if `secret_owner` is `"lazydocker"`. Pre-existing credentials
 // created outside lazydocker (for example via `docker login` or `podman login`)
@@ -38,6 +45,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 
@@ -63,6 +71,7 @@ const (
 
 	defaultDockerHubURL = "docker.io"
 	defaultGHCRURL      = "ghcr.io"
+	dockerHubStoreKey   = "https://index.docker.io/v1/"
 )
 
 var (
@@ -76,6 +85,11 @@ var (
 	ErrNotFound = errors.New("connections: connection not found")
 	// ErrAlreadyExists is returned by Create or Update when the target registry host already exists.
 	ErrAlreadyExists = errors.New("connections: connection already exists")
+	// ErrExternalCredentialExists is returned when saving a connection with a
+	// non-empty secret for a host that already has a credential in the Docker
+	// credential store not owned by lazydocker, and Options.OverwriteExternal is
+	// false.
+	ErrExternalCredentialExists = errors.New("connections: the host already has a docker login; it will be used as-is")
 )
 
 // Kind identifies the backend type of a saved registry connection.
@@ -170,16 +184,26 @@ type Options struct {
 	// DiscoverOptions provides optional overrides (such as HomeDir,
 	// RegistryAuthFile, XDGRuntimeDir) used by ResolveSecret.
 	DiscoverOptions credentials.DiscoverOptions
+
+	// OverwriteExternal controls whether saving a connection with a secret is
+	// allowed to overwrite a pre-existing credential in the Docker credential
+	// store that was not created by lazydocker (SecretOwner !=
+	// SecretOwnerLazydocker). When false (the default), Create, Save, and
+	// Update refuse with ErrExternalCredentialExists. When true, the existing
+	// credential is overwritten in the store, but Connection.SecretOwner is
+	// left empty so a later Delete never erases the user's pre-existing login.
+	OverwriteExternal bool
 }
 
 // Store manages saved registry connections in registries.yml and coordinates
 // secret persistence with the Docker credential store. It is safe for
 // concurrent use within a single process.
 type Store struct {
-	mu              sync.Mutex
-	configDir       string
-	dockerConfigDir string
-	discoverOpts    credentials.DiscoverOptions
+	mu                sync.Mutex
+	configDir         string
+	dockerConfigDir   string
+	discoverOpts      credentials.DiscoverOptions
+	overwriteExternal bool
 }
 
 // NewStore creates a Store that persists registries.yml inside configDir and
@@ -197,9 +221,10 @@ func NewStoreWithOptions(opts Options) *Store {
 		discoverOpts.DockerConfigDir = opts.DockerConfigDir
 	}
 	return &Store{
-		configDir:       strings.TrimSpace(opts.ConfigDir),
-		dockerConfigDir: strings.TrimSpace(opts.DockerConfigDir),
-		discoverOpts:    discoverOpts,
+		configDir:         strings.TrimSpace(opts.ConfigDir),
+		dockerConfigDir:   strings.TrimSpace(opts.DockerConfigDir),
+		discoverOpts:      discoverOpts,
+		overwriteExternal: opts.OverwriteExternal,
 	}
 }
 
@@ -243,8 +268,11 @@ func (s *Store) Get(urlOrHost string) (Connection, error) {
 
 // Create adds a new connection to registries.yml and, when secret is non-empty,
 // writes the secret to the Docker credential store and sets
-// SecretOwner = SecretOwnerLazydocker. It returns ErrAlreadyExists if a
-// connection for the same registry host already exists.
+// SecretOwner = SecretOwnerLazydocker (unless overwriting a pre-existing
+// external login with Options.OverwriteExternal, which leaves SecretOwner
+// empty). It returns ErrAlreadyExists if a connection for the same registry
+// host already exists, or ErrExternalCredentialExists if a pre-existing Docker
+// login exists and OverwriteExternal is false.
 func (s *Store) Create(conn Connection, secret credentials.Secret) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -266,10 +294,11 @@ func (s *Store) Create(conn Connection, secret credentials.Secret) error {
 	}
 
 	if !secret.IsEmpty() {
-		if err := s.storeSecretUnlocked(conn, secret); err != nil {
+		owner, err := s.storeSecretUnlocked(conn, secret, false)
+		if err != nil {
 			return err
 		}
-		conn.SecretOwner = SecretOwnerLazydocker
+		conn.SecretOwner = owner
 	} else {
 		conn.SecretOwner = ""
 	}
@@ -284,7 +313,10 @@ func (s *Store) Create(conn Connection, secret credentials.Secret) error {
 // When secret is non-empty, Save writes the secret through the Docker
 // credential store (configfile.GetCredentialsStore(host).Store) exactly as
 // `docker login` would, and records `secret_owner: lazydocker` in
-// registries.yml.
+// registries.yml unless overwriting a pre-existing external login with
+// Options.OverwriteExternal (which leaves SecretOwner empty). If a pre-existing
+// external login exists and OverwriteExternal is false, Save refuses with
+// ErrExternalCredentialExists and writes nothing.
 //
 // When secret is empty, Save does not touch the Docker credential store; if
 // updating an existing connection in registries.yml, its prior SecretOwner is
@@ -306,14 +338,20 @@ func (s *Store) Save(conn Connection, secret credentials.Secret) error {
 		return err
 	}
 	idx := findConnectionIndex(conns, conn.URL)
+	alreadyOwned := idx >= 0 && conns[idx].SecretOwner == SecretOwnerLazydocker
 
 	if !secret.IsEmpty() {
-		if err := s.storeSecretUnlocked(conn, secret); err != nil {
+		owner, err := s.storeSecretUnlocked(conn, secret, alreadyOwned)
+		if err != nil {
 			return err
 		}
-		conn.SecretOwner = SecretOwnerLazydocker
-	} else if idx >= 0 && conn.SecretOwner == "" {
-		conn.SecretOwner = conns[idx].SecretOwner
+		conn.SecretOwner = owner
+	} else if idx >= 0 {
+		if conn.SecretOwner == "" {
+			conn.SecretOwner = conns[idx].SecretOwner
+		}
+	} else {
+		conn.SecretOwner = ""
 	}
 
 	if idx >= 0 {
@@ -356,12 +394,14 @@ func (s *Store) Update(previousURL string, conn Connection, secret credentials.S
 	}
 
 	hostChanged := prev.Host() != conn.Host()
+	alreadyOwned := !hostChanged && prev.SecretOwner == SecretOwnerLazydocker
 
 	if !secret.IsEmpty() {
-		if err := s.storeSecretUnlocked(conn, secret); err != nil {
+		owner, err := s.storeSecretUnlocked(conn, secret, alreadyOwned)
+		if err != nil {
 			return err
 		}
-		conn.SecretOwner = SecretOwnerLazydocker
+		conn.SecretOwner = owner
 		if hostChanged && prev.SecretOwner == SecretOwnerLazydocker {
 			_ = s.eraseSecretUnlocked(prev)
 		}
@@ -574,15 +614,33 @@ func (s *Store) resolveDockerConfigDir() string {
 	return filepath.Join(filepath.Clean(home), ".docker")
 }
 
-func (s *Store) storeSecretUnlocked(conn Connection, secret credentials.Secret) error {
+func (s *Store) storeSecretUnlocked(conn Connection, secret credentials.Secret, alreadyOwned bool) (string, error) {
 	cf, err := s.loadDockerConfigFile()
 	if err != nil {
-		return err
+		return "", err
 	}
 
-	host := resolveStoreKey(cf, conn.URL)
-	if host == "" {
-		return ErrEmptyURL
+	key := resolveStoreKey(cf, conn.URL)
+	if key == "" {
+		return "", ErrEmptyURL
+	}
+
+	credStore := cf.GetCredentialsStore(key)
+	existing, getErr := credStore.Get(key)
+	if getErr != nil {
+		if !dchcreds.IsErrCredentialsNotFound(getErr) && !dchcreds.IsErrCredentialsNotFoundMessage(getErr.Error()) {
+			return "", sanitizeStoreError("reading", key, getErr)
+		}
+		existing = types.AuthConfig{}
+	}
+
+	hasExisting := hasAuthCredential(existing)
+	owner := SecretOwnerLazydocker
+	if hasExisting && !alreadyOwned {
+		if !s.overwriteExternal {
+			return "", fmt.Errorf("%w: %s", ErrExternalCredentialExists, conn.Host())
+		}
+		owner = ""
 	}
 
 	username := strings.TrimSpace(secret.Username)
@@ -591,7 +649,7 @@ func (s *Store) storeSecretUnlocked(conn Connection, secret credentials.Secret) 
 	}
 
 	authCfg := types.AuthConfig{
-		ServerAddress: host,
+		ServerAddress: key,
 		Username:      username,
 		Password:      secret.Password,
 		IdentityToken: secret.IdentityToken,
@@ -607,10 +665,10 @@ func (s *Store) storeSecretUnlocked(conn Connection, secret credentials.Secret) 
 		authCfg.Password = ""
 	}
 
-	if err := cf.GetCredentialsStore(host).Store(authCfg); err != nil {
-		return sanitizeStoreError("storing", host, err)
+	if err := credStore.Store(authCfg); err != nil {
+		return "", sanitizeStoreError("storing", key, err)
 	}
-	return nil
+	return owner, nil
 }
 
 func (s *Store) eraseSecretUnlocked(conn Connection) error {
@@ -619,39 +677,101 @@ func (s *Store) eraseSecretUnlocked(conn Connection) error {
 		return err
 	}
 
-	host := resolveStoreKey(cf, conn.URL)
-	if host == "" {
+	key := resolveStoreKey(cf, conn.URL)
+	if key == "" {
 		return nil
 	}
 
-	if err := cf.GetCredentialsStore(host).Erase(host); err != nil {
+	if err := cf.GetCredentialsStore(key).Erase(key); err != nil {
 		if !dchcreds.IsErrCredentialsNotFound(err) && !dchcreds.IsErrCredentialsNotFoundMessage(err.Error()) {
-			return sanitizeStoreError("erasing", host, err)
+			return sanitizeStoreError("erasing", key, err)
 		}
 	}
 	return nil
 }
 
+func hasAuthCredential(ac types.AuthConfig) bool {
+	return ac.Username != "" ||
+		ac.Password != "" ||
+		ac.IdentityToken != "" ||
+		ac.RegistryToken != "" ||
+		ac.Auth != ""
+}
+
 func resolveStoreKey(cf *configfile.ConfigFile, rawURL string) string {
 	normHost := credentials.NormalizeRegistry(rawURL)
-	if normHost == "" || cf == nil {
-		return normHost
+	if normHost == "" {
+		return ""
 	}
 	rawTrimmed := strings.TrimSpace(rawURL)
-	if len(cf.CredentialHelpers) > 0 {
-		if _, ok := cf.CredentialHelpers[rawTrimmed]; ok {
-			return rawTrimmed
+	if cf != nil {
+		if key := matchCredHelperKey(cf.CredentialHelpers, rawTrimmed, normHost); key != "" {
+			return key
 		}
-		if _, ok := cf.CredentialHelpers[normHost]; ok {
-			return normHost
-		}
-		for k := range cf.CredentialHelpers {
-			if credentials.NormalizeRegistry(k) == normHost {
-				return k
-			}
+		if key := matchAuthConfigKey(cf.AuthConfigs, rawTrimmed, normHost); key != "" {
+			return key
 		}
 	}
+	if normHost == defaultDockerHubURL {
+		return dockerHubStoreKey
+	}
 	return normHost
+}
+
+func matchCredHelperKey(helpers map[string]string, rawTrimmed, normHost string) string {
+	if len(helpers) == 0 {
+		return ""
+	}
+	if rawTrimmed != "" && strings.TrimSpace(helpers[rawTrimmed]) != "" {
+		return rawTrimmed
+	}
+	if normHost == defaultDockerHubURL && strings.TrimSpace(helpers[dockerHubStoreKey]) != "" {
+		return dockerHubStoreKey
+	}
+	if strings.TrimSpace(helpers[normHost]) != "" {
+		return normHost
+	}
+	keys := make([]string, 0, len(helpers))
+	for k := range helpers {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if strings.TrimSpace(helpers[k]) != "" && credentials.NormalizeRegistry(k) == normHost {
+			return k
+		}
+	}
+	return ""
+}
+
+func matchAuthConfigKey(auths map[string]types.AuthConfig, rawTrimmed, normHost string) string {
+	if len(auths) == 0 {
+		return ""
+	}
+	if rawTrimmed != "" {
+		if _, ok := auths[rawTrimmed]; ok {
+			return rawTrimmed
+		}
+	}
+	if normHost == defaultDockerHubURL {
+		if _, ok := auths[dockerHubStoreKey]; ok {
+			return dockerHubStoreKey
+		}
+	}
+	if _, ok := auths[normHost]; ok {
+		return normHost
+	}
+	keys := make([]string, 0, len(auths))
+	for k := range auths {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if credentials.NormalizeRegistry(k) == normHost {
+			return k
+		}
+	}
+	return ""
 }
 
 func sanitizeStoreError(action, host string, err error) error {
