@@ -158,6 +158,26 @@ type TranslationSet struct {
 	RegistriesStatusOnline        string
 	RegistriesStatusOffline       string
 	RegistriesStatusUnauthorized  string
+
+	// L3.2 — Registry connection CRUD flows
+	AddRegistryConnection             string
+	EditRegistryConnection            string
+	DeleteRegistryConnection          string
+	RegistryKindMenuTitle             string
+	RegistryKindGeneric               string
+	RegistryKindDockerHub             string
+	RegistryKindGHCR                  string
+	RegistryURLPromptTitle            string
+	RegistryUsernamePromptTitle       string
+	RegistrySecretPromptTitle         string
+	RegistrySecretEditPromptTitle     string
+	RegistryEmptyURLError             string
+	DeleteRegistryConnectionTitle     string
+	ConfirmDeleteRegistryConnection   string
+	CannotDeleteAutoDetectedRegistry  string
+	CannotEditAutoDetectedRegistry    string
+	RegistryExternalCredentialTitle   string
+	RegistryExternalCredentialMessage string
 }
 
 func englishSet() TranslationSet {
@@ -323,5 +343,25 @@ func englishSet() TranslationSet {
 		RegistriesStatusOnline:        "online",
 		RegistriesStatusOffline:       "offline",
 		RegistriesStatusUnauthorized:  "unauthorized",
+
+		// L3.2 — Registry connection CRUD flows
+		AddRegistryConnection:             "add registry connection",
+		EditRegistryConnection:            "edit registry connection",
+		DeleteRegistryConnection:          "delete registry connection",
+		RegistryKindMenuTitle:             "Registry Type",
+		RegistryKindGeneric:               "Generic Registry (OCI / Docker v2)",
+		RegistryKindDockerHub:             "Docker Hub (docker.io)",
+		RegistryKindGHCR:                  "GitHub Container Registry (ghcr.io)",
+		RegistryURLPromptTitle:            "Registry URL:",
+		RegistryUsernamePromptTitle:       "Username (optional):",
+		RegistrySecretPromptTitle:         "Password / token (optional):",
+		RegistrySecretEditPromptTitle:     "Password / token (leave empty to keep existing):",
+		RegistryEmptyURLError:             "Registry URL cannot be empty.",
+		DeleteRegistryConnectionTitle:     "Delete Registry Connection",
+		ConfirmDeleteRegistryConnection:   "Are you sure you want to delete the saved connection for {{registry}}?",
+		CannotDeleteAutoDetectedRegistry:  "Auto-detected registry logins come from your Docker/Podman config and cannot be deleted here.",
+		CannotEditAutoDetectedRegistry:    "Auto-detected registry logins come from your Docker/Podman config and cannot be edited here.",
+		RegistryExternalCredentialTitle:   "Existing Login Detected",
+		RegistryExternalCredentialMessage: "An existing Docker login was found for this registry and will be used as-is.",
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"github.com/jesseduffield/gocui"
 	"github.com/jesseduffield/lazydocker/pkg/gui/panels"
 	"github.com/jesseduffield/lazydocker/pkg/registry"
+	"github.com/jesseduffield/lazydocker/pkg/registry/connections"
 	"github.com/jesseduffield/lazydocker/pkg/registry/credentials"
 	"github.com/jesseduffield/lazydocker/pkg/tasks"
 	"github.com/jesseduffield/lazydocker/pkg/utils"
@@ -37,6 +38,12 @@ type registriesState struct {
 	// generation: bumped by every refresh; discovery sets and ping results
 	// from an older generation are dropped when they land.
 	generation uint64
+	// store overrides connections.NewStore(gui.Config.ConfigDir) when set
+	// (used by tests to inject a temporary ConfigDir and DockerConfigDir).
+	store *connections.Store
+	// storeLoadFn, when set, overrides reading saved connections in tests
+	// (e.g. to verify D-09 lazy store reads).
+	storeLoadFn func() ([]connections.Connection, error)
 }
 
 // beginRefresh marks the panel loaded and opens a new generation. Synchronous
@@ -72,7 +79,7 @@ func (gui *Gui) getRegistriesPanel() *panels.SideListPanel[*registryItem] {
 			// re-renders the summary of the selected row (the periodic
 			// checkForContextChange calls HandleSelect every second).
 			GetItemContextCacheKey: func(item *registryItem) string {
-				return "registries-" + item.Host + "-" + string(item.Status) + "-" + item.Duration.String() + "-" + item.Err
+				return "registries-" + item.Host + "-" + item.Username + "-" + string(item.Status) + "-" + item.Duration.String() + "-" + item.Err
 			},
 		},
 		ListPanel: panels.ListPanel[*registryItem]{
@@ -188,10 +195,10 @@ func (gui *Gui) handleRegistriesRefresh(g *gocui.Gui, v *gocui.View) error {
 	return nil
 }
 
-// refreshRegistries re-reads the auto-detected auth sources and re-pings
-// every registry. Discovery and pings run off the UI thread; results land on
-// the UI thread via gui.g.Update and are dropped when a newer refresh has
-// since been issued (S-03).
+// refreshRegistries re-reads saved connections and auto-detected auth sources
+// and re-pings every registry. Store reads, discovery and pings run off the UI
+// thread; results land on the UI thread via gui.g.Update and are dropped when
+// a newer refresh has since been issued (S-03).
 func (gui *Gui) refreshRegistries() {
 	if gui.Panels.Registries == nil || gui.g == nil {
 		return
@@ -199,28 +206,22 @@ func (gui *Gui) refreshRegistries() {
 	gen := gui.registriesState.beginRefresh()
 
 	go func() {
-		sources, err := gui.registriesDiscover()
-		if err != nil {
+		saved, storePath, savedErr := gui.registriesLoadSaved()
+		if savedErr != nil {
+			gui.Log.Errorf("registries: loading saved connections: %s", savedErr)
+		}
+		sources, discoverErr := gui.registriesDiscover()
+		if discoverErr != nil {
 			// credentials.Discover errors are secret-free by construction.
 			// When no sources were returned, the panel keeps its current rows
 			// and the user can retry with 'r'.
-			gui.Log.Errorf("registries: discovering auth sources: %s", err)
-			if len(sources) == 0 {
-				return
-			}
+			gui.Log.Errorf("registries: discovering auth sources: %s", discoverErr)
+		}
+		if (savedErr != nil || discoverErr != nil) && len(saved) == 0 && len(sources) == 0 {
+			return
 		}
 
-		items := make([]*registryItem, 0, len(sources))
-		for _, src := range sources {
-			items = append(items, &registryItem{
-				Kind:         registryKindRegistry,
-				Host:         src.Registry,
-				Username:     src.Username,
-				SourceFile:   src.Source,
-				AutoDetected: true,
-				Status:       registryItemStatusChecking,
-			})
-		}
+		items := mergeRegistryItems(saved, storePath, sources)
 
 		gui.g.Update(func(*gocui.Gui) error {
 			gui.applyRegistriesRefresh(gen, items)
@@ -233,6 +234,66 @@ func (gui *Gui) refreshRegistries() {
 	}()
 }
 
+// mergeRegistryItems merges saved connections from registries.yml with
+// auto-detected auth sources. A host present in both appears once as a saved
+// connection (AutoDetected: false, no "(auto)" suffix). If a saved connection
+// left Username empty and a matching auto-detected source has a username, the
+// auto-detected username is used for display.
+func mergeRegistryItems(saved []connections.Connection, storePath string, sources []credentials.AuthSource) []*registryItem {
+	items := make([]*registryItem, 0, len(saved)+len(sources))
+	savedByHost := make(map[string]*registryItem, len(saved))
+
+	for _, rawConn := range saved {
+		conn := rawConn.Normalize()
+		host := conn.Host()
+		if host == "" {
+			continue
+		}
+		if _, exists := savedByHost[host]; exists {
+			continue
+		}
+		item := &registryItem{
+			Kind:         registryKindRegistry,
+			Host:         host,
+			Username:     conn.Username,
+			SourceFile:   storePath,
+			AutoDetected: false,
+			Connection:   conn,
+			Status:       registryItemStatusChecking,
+		}
+		savedByHost[host] = item
+		items = append(items, item)
+	}
+
+	seenAuto := make(map[string]bool, len(sources))
+	for _, src := range sources {
+		host := credentials.NormalizeRegistry(src.Registry)
+		if host == "" {
+			continue
+		}
+		if savedItem, exists := savedByHost[host]; exists {
+			if savedItem.Username == "" && src.Username != "" {
+				savedItem.Username = src.Username
+			}
+			continue
+		}
+		if seenAuto[host] {
+			continue
+		}
+		seenAuto[host] = true
+		items = append(items, &registryItem{
+			Kind:         registryKindRegistry,
+			Host:         host,
+			Username:     src.Username,
+			SourceFile:   src.Source,
+			AutoDetected: true,
+			Status:       registryItemStatusChecking,
+		})
+	}
+
+	return items
+}
+
 // applyRegistriesRefresh installs a freshly discovered item set, unless a
 // newer refresh has superseded this generation. Runs on the UI thread.
 func (gui *Gui) applyRegistriesRefresh(gen uint64, items []*registryItem) {
@@ -240,6 +301,9 @@ func (gui *Gui) applyRegistriesRefresh(gen uint64, items []*registryItem) {
 		return
 	}
 	gui.Panels.Registries.SetItems(items)
+	if gui.IsCurrentView(gui.Views.Registries) {
+		_ = gui.Panels.Registries.HandleSelect()
+	}
 	_ = gui.Panels.Registries.RerenderList()
 }
 
@@ -280,7 +344,53 @@ func (gui *Gui) applyRegistriesPing(gen uint64, item *registryItem, res registry
 		item.Status = registryItemStatusOffline
 	}
 
+	if gui.IsCurrentView(gui.Views.Registries) {
+		_ = gui.Panels.Registries.HandleSelect()
+	}
 	_ = gui.Panels.Registries.RerenderList()
+}
+
+// registriesStore returns the saved-connections Store for gui.Config.ConfigDir
+// (or the test-injected override on registriesState).
+func (gui *Gui) registriesStore() *connections.Store {
+	gui.registriesState.mu.Lock()
+	s := gui.registriesState.store
+	gui.registriesState.mu.Unlock()
+	if s != nil {
+		return s
+	}
+	var configDir string
+	if gui.Config != nil {
+		configDir = gui.Config.ConfigDir
+	}
+	return connections.NewStore(configDir)
+}
+
+// registriesLoadSaved reads saved connections lazily (D-09: only called during
+// refreshRegistries after first focus or manual refresh).
+func (gui *Gui) registriesLoadSaved() ([]connections.Connection, string, error) {
+	gui.registriesState.mu.Lock()
+	loadFn := gui.registriesState.storeLoadFn
+	s := gui.registriesState.store
+	gui.registriesState.mu.Unlock()
+
+	if loadFn != nil {
+		conns, err := loadFn()
+		storePath := ""
+		if s != nil {
+			storePath = s.Path()
+		} else if gui.Config != nil && gui.Config.ConfigDir != "" {
+			storePath = connections.NewStore(gui.Config.ConfigDir).Path()
+		}
+		return conns, storePath, err
+	}
+
+	if s == nil && (gui.Config == nil || gui.Config.ConfigDir == "") {
+		return nil, "", nil
+	}
+	store := gui.registriesStore()
+	conns, err := store.List()
+	return conns, store.Path(), err
 }
 
 // registriesDiscover returns the auto-detected registry auth sources,

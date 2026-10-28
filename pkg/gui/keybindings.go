@@ -454,6 +454,27 @@ func (gui *Gui) GetInitialKeybindings() []*Binding {
 			Description: gui.Tr.RefreshRegistries,
 		},
 		{
+			ViewName:    "registries",
+			Key:         'n',
+			Modifier:    gocui.ModNone,
+			Handler:     gui.handleAddRegistryConnection,
+			Description: gui.Tr.AddRegistryConnection,
+		},
+		{
+			ViewName:    "registries",
+			Key:         'e',
+			Modifier:    gocui.ModNone,
+			Handler:     gui.handleEditRegistryConnection,
+			Description: gui.Tr.EditRegistryConnection,
+		},
+		{
+			ViewName:    "registries",
+			Key:         'd',
+			Modifier:    gocui.ModNone,
+			Handler:     gui.handleDeleteRegistryConnection,
+			Description: gui.Tr.DeleteRegistryConnection,
+		},
+		{
 			ViewName:    "main",
 			Key:         gocui.KeyEsc,
 			Modifier:    gocui.ModNone,

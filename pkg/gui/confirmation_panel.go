@@ -69,12 +69,20 @@ func (gui *Gui) getConfirmationPanelDimensions(wrap bool, prompt string) (int, i
 }
 
 func (gui *Gui) createPromptPanel(title string, handleConfirm func(*gocui.Gui, *gocui.View) error) error {
+	return gui.createPrefilledPromptPanel(title, "", handleConfirm)
+}
+
+func (gui *Gui) createPrefilledPromptPanel(title, initialValue string, handleConfirm func(*gocui.Gui, *gocui.View) error) error {
 	gui.onNewPopupPanel()
 	err := gui.prepareConfirmationPanel(title, "")
 	if err != nil {
 		return err
 	}
 	gui.Views.Confirmation.Editable = true
+	if initialValue != "" {
+		gui.Views.Confirmation.TextArea.TypeString(initialValue)
+		gui.Views.Confirmation.RenderTextArea()
+	}
 	return gui.setKeyBindings(gui.g, handleConfirm, nil)
 }
 
@@ -83,14 +91,14 @@ func (gui *Gui) createPromptPanel(title string, handleConfirm func(*gocui.Gui, *
 // are not echoed to the screen. The mask is reset and the buffer cleared so
 // the next popup neither masks nor shows the secret (see
 // closeConfirmationPrompt and prepareConfirmationPanel).
-// Nothing calls this yet; the registry connection flows (L3.2) will.
-// nolint:unused
 func (gui *Gui) createMaskedPromptPanel(title string, handleConfirm func(*gocui.Gui, *gocui.View) error) error {
 	gui.onNewPopupPanel()
 	err := gui.prepareConfirmationPanel(title, "")
 	if err != nil {
 		return err
 	}
+	_ = gui.Views.Confirmation.SetOrigin(0, 0)
+	_ = gui.Views.Confirmation.SetCursor(0, 0)
 	gui.Views.Confirmation.Editable = true
 	gui.Views.Confirmation.Mask = '*'
 	return gui.setKeyBindings(gui.g, handleConfirm, nil)
@@ -103,10 +111,11 @@ func (gui *Gui) prepareConfirmationPanel(title, prompt string) error {
 	if err != nil {
 		return err
 	}
-	// Start from an empty buffer so input left behind by a previous prompt
-	// (which may contain a masked secret) is never shown in this popup.
-	// Non-editable popups render their own content after this point.
-	confirmationView.Clear()
+	// Start from an empty buffer and reset cursor/origin to (0, 0) so input
+	// left behind by a previous prompt (which may contain a masked secret or
+	// a non-zero cursor column) never leaks into this popup. Non-editable
+	// popups render their own content after this point.
+	confirmationView.ClearTextArea()
 	confirmationView.Title = title
 	confirmationView.Visible = true
 	gui.g.Update(func(g *gocui.Gui) error {
@@ -129,7 +138,7 @@ func (gui *Gui) createConfirmationPanel(title, prompt string, handleConfirm, han
 
 func (gui *Gui) createPopupPanel(title, prompt string, handleConfirm, handleClose func(*gocui.Gui, *gocui.View) error) error {
 	gui.onNewPopupPanel()
-	gui.g.Update(func(g *gocui.Gui) error {
+	gui.runOnUIThread(func(g *gocui.Gui) error {
 		if gui.currentViewName() == "confirmation" {
 			if err := gui.closeConfirmationPrompt(); err != nil {
 				gui.Log.Error(err.Error())
@@ -140,7 +149,9 @@ func (gui *Gui) createPopupPanel(title, prompt string, handleConfirm, handleClos
 			return err
 		}
 		gui.Views.Confirmation.Editable = false
-		if err := gui.renderString(g, "confirmation", prompt); err != nil {
+		// Already on the UI thread here, so set the content directly rather
+		// than through renderString's second g.Update hop.
+		if err := gui.setViewContent(gui.Views.Confirmation, prompt); err != nil {
 			return err
 		}
 		return gui.setKeyBindings(g, handleConfirm, handleClose)
@@ -148,19 +159,35 @@ func (gui *Gui) createPopupPanel(title, prompt string, handleConfirm, handleClos
 	return nil
 }
 
+// runOnUIThread schedules f on the gocui event loop (g.Update), which is what
+// makes popups safe to open from background goroutines. Tests set uiUpdate to
+// run f synchronously, since a headless gui has no running event loop.
+func (gui *Gui) runOnUIThread(f func(*gocui.Gui) error) {
+	if gui.uiUpdate != nil {
+		gui.uiUpdate(f)
+		return
+	}
+	gui.g.Update(f)
+}
+
 func (gui *Gui) setKeyBindings(g *gocui.Gui, handleConfirm, handleClose func(*gocui.Gui, *gocui.View) error) error {
+	wrappedConfirm := gui.wrappedConfirmationFunction(handleConfirm)
+	wrappedClose := gui.wrappedConfirmationFunction(handleClose)
+
+	gui.popupBindings = popupBindings{confirm: wrappedConfirm, close: wrappedClose}
+
 	// would use a loop here but because the function takes an interface{} and slices of interfaces require even more boilerplate
-	if err := g.SetKeybinding("confirmation", gocui.KeyEnter, gocui.ModNone, gui.wrappedConfirmationFunction(handleConfirm)); err != nil {
+	if err := g.SetKeybinding("confirmation", gocui.KeyEnter, gocui.ModNone, wrappedConfirm); err != nil {
 		return err
 	}
-	if err := g.SetKeybinding("confirmation", 'y', gocui.ModNone, gui.wrappedConfirmationFunction(handleConfirm)); err != nil {
+	if err := g.SetKeybinding("confirmation", 'y', gocui.ModNone, wrappedConfirm); err != nil {
 		return err
 	}
 
-	if err := g.SetKeybinding("confirmation", gocui.KeyEsc, gocui.ModNone, gui.wrappedConfirmationFunction(handleClose)); err != nil {
+	if err := g.SetKeybinding("confirmation", gocui.KeyEsc, gocui.ModNone, wrappedClose); err != nil {
 		return err
 	}
-	if err := g.SetKeybinding("confirmation", 'n', gocui.ModNone, gui.wrappedConfirmationFunction(handleClose)); err != nil {
+	if err := g.SetKeybinding("confirmation", 'n', gocui.ModNone, wrappedClose); err != nil {
 		return err
 	}
 

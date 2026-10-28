@@ -196,7 +196,7 @@ conventions.
 
 - [x] **L3.1 Registries panel.** `[medium | F-0001,F-0020,S-03,S-04 | after L1.1 L2.1]`
 - [x] **L3.4 Masked prompt input.** `[light | S-04 | after L0.1]`
-- [ ] **L3.2 Connection CRUD flows.** ⚠️ `[heavy | F-0002,F-0003,F-0004,S-04 | after L3.1 L3.4 L2.2]`
+- [x] **L3.2 Connection CRUD flows.** ⚠️ `[heavy | F-0002,F-0003,F-0004,S-04 | after L3.1 L3.4 L2.2]`
 - [ ] **L3.3 Status rendering and i18n.** `[light | F-0001,F-0021,S-06 | after L3.1]`
 
 ### Phase L4 — repository & tag browsing
@@ -320,3 +320,4 @@ Append at the top; take the next free `D-0NN` at commit time.
 | L1.4 | (see git log --grep '[L1.4]') | pkg/registry/dockerhub client: login JWT + PAT auth, paginated repo/tag listing, PUBLIC/PRIVATE visibility, Validate, tag + repo delete, and origin/scheme/redirect guards (rescued from glm-2 + reviewed/hardened), by gemini |
 | L7.1 | (see git log --grep '[L7.1]') | pkg/commands PullImage (partial: commands layer): reference.ParseNormalizedNamed validation, auth ServerAddress/domain matching (including Docker Hub aliases), base64url RegistryAuth encoding with error scrubbing, ImagePull JSON stream decoding, and FoldPullProgress in-place layer folding, by gemini |
 | L1.3 | (see git log --grep '[L1.3]') | pkg/registry tag details (config blob fetch + digest verification, index platform resolution, layers + total size), TagsSharingDigest, DeleteManifest (typed ErrDeleteUnsupported / 401 / 403 / 404) + registrytest blobs/redirect/delete fixture, by gemini-2 |
+| L3.2 | (see git log --grep '[L3.2]') | connection add/edit/delete via menu + prompts + masked secret; saved/auto merge; started by gemini-3, finished by opus |
