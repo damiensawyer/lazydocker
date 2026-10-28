@@ -217,7 +217,7 @@ and must leave every existing panel's behaviour unchanged.
 - [ ] **L4.1 Repository drill-down.** `[medium | F-0009,S-04 | after L3.1]`
 - [ ] **L4.2 Tag list.** `[medium | F-0010,S-03,S-04 | after L4.1 L1.2]`
 - [ ] **L4.3 Copy pull command.** `[medium | F-0019,S-04,S-06 | after L4.2]`
-- [ ] **L4.4 Multi-select in side lists.** `[heavy | F-0012,S-04 | after L0.1]`
+- [x] **L4.4 Multi-select in side lists.** `[heavy | F-0012,S-04 | after L0.1]`
 
 ### Phase L5 — tag details in the main view
 
@@ -314,3 +314,4 @@ Append at the top; take the next free `D-0NN` at commit time.
 | L2.1 | (see git log --grep '[L2.1]') | docker + podman credential auto-detection and lazy helper resolution, by gemini |
 | L1.5 | (see git log --grep '[L1.5]') | pkg/registry/ghcr client: GitHub packages listing (user/org detection, pagination, visibility), version listing, resolve-then-delete + package delete, and ghcr.io registry client helper, by gemini-2 |
 | L2.2 | (see git log --grep '[L2.2]') | saved-connections store (`registries.yml`, mode 0600, no secrets on disk), Docker credential store integration (`secret_owner: lazydocker`), schema docs + L2.1 review follow-ups; review fixes: refuse clobbering pre-existing docker logins (`ErrExternalCredentialExists` / `Options.OverwriteExternal`) and match Docker's own store keys (`https://index.docker.io/v1/` for Hub, existing `auths`/`credHelpers` keys), by gemini |
+| L4.4 | (see git log --grep '[L4.4]') | opt-in multi-select in SideListPanel (toggle, range select, key persistence, title count, row markers, SelectedItems fallback), by gemini-3 |
