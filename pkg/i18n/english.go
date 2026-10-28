@@ -184,6 +184,9 @@ type TranslationSet struct {
 	RegistriesSummaryRepository string
 	RegistriesSummaryVisibility string
 
+	// L4.2 — Tag list
+	NoTags string
+
 	// L5.1 — Tag details renderers
 	TagSummaryTag                string
 	TagSummaryDigest             string
@@ -408,6 +411,9 @@ func englishSet() TranslationSet {
 		NoRepositories:              "No repositories",
 		RegistriesSummaryRepository: "Repository:",
 		RegistriesSummaryVisibility: "Visibility:",
+
+		// L4.2 — Tag list
+		NoTags: "No tags",
 
 		// L5.1 — Tag details renderers
 		TagSummaryTag:                "Tag:",

@@ -1037,6 +1037,17 @@ func (f *fakeRepoSource) ListRepositories(ctx context.Context, item *registryIte
 	return nil, nil
 }
 
+type fakeTagSource struct {
+	fn func(ctx context.Context, item *registryItem) ([]registryTag, error)
+}
+
+func (f *fakeTagSource) ListTags(ctx context.Context, item *registryItem) ([]registryTag, error) {
+	if f.fn != nil {
+		return f.fn(ctx, item)
+	}
+	return nil, nil
+}
+
 // L4.1: Enter on a registry drills into repositories, updating the panel title
 // with the breadcrumb path ("Registries › <host>"). Esc on the drilled level
 // pops back, restoring the previous list and cursor position.
@@ -1504,5 +1515,526 @@ func TestRegistriesDrillListingErrorRendersInMainView(t *testing.T) {
 	}
 	if gui.Panels.Registries.NoItemsMessage != "ghcr: unauthorized to list packages" {
 		t.Fatalf("NoItemsMessage = %q; want unauthorized error", gui.Panels.Registries.NoItemsMessage)
+	}
+}
+
+// L4.2: Enter on a repository drills into tags, updating the panel title with
+// the breadcrumb path ("Registries › <host> › <repo>"). Esc on the drilled level
+// pops back, restoring the repository list and cursor position.
+func TestRegistriesTagsDrillPushPopRestoresListAndCursor(t *testing.T) {
+	gui := newHeadlessRegistriesTestGui(t)
+	if err := gui.switchFocus(gui.Views.Registries); err != nil {
+		t.Fatalf("switchFocus: %s", err)
+	}
+
+	items := []*registryItem{
+		{Kind: registryKindRegistry, Host: "docker.io", Username: "user1", Status: registryItemStatusOnline},
+		{Kind: registryKindRegistry, Host: "ghcr.io", Username: "user2", Status: registryItemStatusOnline},
+	}
+	gui.Panels.Registries.SetItems(items)
+	gui.Panels.Registries.SetSelectedLineIdx(1) // ghcr.io
+	_ = gui.Panels.Registries.HandleSelect()
+
+	gui.registriesState.repoSource = &fakeRepoSource{
+		fn: func(ctx context.Context, item *registryItem) ([]registryRepository, error) {
+			return []registryRepository{
+				{Name: "octocat/hello-world", Visibility: "PUBLIC"},
+				{Name: "octocat/private-pkg", Visibility: "PRIVATE"},
+			}, nil
+		},
+	}
+
+	tagLoadDone := make(chan struct{})
+	gui.registriesState.tagSource = &fakeTagSource{
+		fn: func(ctx context.Context, item *registryItem) ([]registryTag, error) {
+			if item.Repository != "octocat/hello-world" {
+				t.Fatalf("unexpected repository %q", item.Repository)
+			}
+			close(tagLoadDone)
+			return []registryTag{
+				{Name: "v1.0.0", Digest: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"},
+				{Name: "latest", Digest: "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"},
+			}, nil
+		},
+	}
+
+	// 1. Enter to drill into ghcr.io repositories
+	if err := gui.handleRegistriesEnter(gui.g, gui.Views.Registries); err != nil {
+		t.Fatalf("handleRegistriesEnter (registry): %s", err)
+	}
+	waitUntil(t, 2*time.Second, func() bool {
+		return gui.Panels.Registries.List.Len() == 2
+	}, "repositories not loaded")
+
+	repo, err := gui.Panels.Registries.GetSelectedItem()
+	if err != nil || repo.Repository != "octocat/hello-world" {
+		t.Fatalf("GetSelectedItem() = %+v, %v; want octocat/hello-world", repo, err)
+	}
+
+	// 2. Enter to drill into octocat/hello-world tags
+	if err := gui.handleRegistriesEnter(gui.g, gui.Views.Registries); err != nil {
+		t.Fatalf("handleRegistriesEnter (repo): %s", err)
+	}
+
+	// Title starts with (loading…) suffix
+	wantLoadingTitle := "Registries › ghcr.io › octocat/hello-world (loading…)"
+	if gui.Views.Registries.Title != wantLoadingTitle {
+		t.Fatalf("Title = %q; want %q", gui.Views.Registries.Title, wantLoadingTitle)
+	}
+
+	// Wait for tags to load
+	select {
+	case <-tagLoadDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for tags to load")
+	}
+
+	waitUntil(t, 2*time.Second, func() bool {
+		return gui.Panels.Registries.List.Len() == 2
+	}, "tags not loaded into list")
+
+	wantTitle := "Registries › ghcr.io › octocat/hello-world"
+	if gui.Views.Registries.Title != wantTitle {
+		t.Fatalf("Title = %q; want %q", gui.Views.Registries.Title, wantTitle)
+	}
+
+	tag0, err := gui.Panels.Registries.GetSelectedItem()
+	if err != nil || tag0.Tag != "latest" { // sorted alphabetically: "latest" < "v1.0.0"
+		t.Fatalf("GetSelectedItem() = %+v, %v; want latest", tag0, err)
+	}
+
+	// Verify display strings for ghcr: tag name and short digest
+	displayStrings := gui.getRegistriesDisplayStrings(tag0)
+	if len(displayStrings) != 2 || displayStrings[0] != "latest" || displayStrings[1] != "abcdef012345" {
+		t.Fatalf("displayStrings = %+v; want [latest abcdef012345]", displayStrings)
+	}
+
+	// Verify tag summary string contains registry, repository, tag, digest
+	summary := gui.registriesSummaryStr(tag0)
+	if !strings.Contains(summary, "ghcr.io") || !strings.Contains(summary, "octocat/hello-world") || !strings.Contains(summary, "latest") || !strings.Contains(summary, "sha256:abcdef") {
+		t.Fatalf("summary = %q; missing expected tag fields", summary)
+	}
+
+	// Select tag at index 1 ("v1.0.0")
+	gui.Panels.Registries.SetSelectedLineIdx(1)
+	_ = gui.Panels.Registries.HandleSelect()
+
+	tag1, err := gui.Panels.Registries.GetSelectedItem()
+	if err != nil || tag1.Tag != "v1.0.0" {
+		t.Fatalf("GetSelectedItem() = %+v, %v; want v1.0.0", tag1, err)
+	}
+
+	// 3. Esc pops back to repository level
+	if err := gui.handleRegistriesEscape(gui.g, gui.Views.Registries); err != nil {
+		t.Fatalf("handleRegistriesEscape (from tags): %s", err)
+	}
+
+	wantRepoTitle := "Registries › ghcr.io"
+	if gui.Views.Registries.Title != wantRepoTitle {
+		t.Fatalf("Title = %q; want %q", gui.Views.Registries.Title, wantRepoTitle)
+	}
+	if got := gui.Panels.Registries.List.Len(); got != 2 {
+		t.Fatalf("List.Len() = %d; want 2 repos", got)
+	}
+	if gui.Panels.Registries.SelectedIdx != 0 {
+		t.Fatalf("SelectedIdx = %d; want 0 (octocat/hello-world restored)", gui.Panels.Registries.SelectedIdx)
+	}
+	restoredRepo, err := gui.Panels.Registries.GetSelectedItem()
+	if err != nil || restoredRepo.Repository != "octocat/hello-world" {
+		t.Fatalf("GetSelectedItem() = %+v, %v; want octocat/hello-world", restoredRepo, err)
+	}
+
+	// 4. Esc pops back to registry level
+	if err := gui.handleRegistriesEscape(gui.g, gui.Views.Registries); err != nil {
+		t.Fatalf("handleRegistriesEscape (from repos): %s", err)
+	}
+
+	if gui.Views.Registries.Title != gui.Tr.RegistriesTitle {
+		t.Fatalf("Title = %q; want %q", gui.Views.Registries.Title, gui.Tr.RegistriesTitle)
+	}
+	if got := gui.Panels.Registries.List.Len(); got != 2 {
+		t.Fatalf("List.Len() = %d; want 2 registries", got)
+	}
+	if gui.Panels.Registries.SelectedIdx != 1 {
+		t.Fatalf("SelectedIdx = %d; want 1 (ghcr.io restored)", gui.Panels.Registries.SelectedIdx)
+	}
+}
+
+// L4.2: Stale tag results dropped by generation if user leaves the level.
+func TestRegistriesTagsDrillDropsStaleResultsForLeftLevel(t *testing.T) {
+	gui := newHeadlessRegistriesTestGui(t)
+	if err := gui.switchFocus(gui.Views.Registries); err != nil {
+		t.Fatalf("switchFocus: %s", err)
+	}
+
+	gui.Panels.Registries.SetItems([]*registryItem{
+		{Kind: registryKindRegistry, Host: "docker.io", Username: "user1", Status: registryItemStatusOnline},
+	})
+	gui.Panels.Registries.SetSelectedLineIdx(0)
+
+	gui.registriesState.repoSource = &fakeRepoSource{
+		fn: func(ctx context.Context, item *registryItem) ([]registryRepository, error) {
+			return []registryRepository{
+				{Name: "myuser/slow-repo"},
+			}, nil
+		},
+	}
+
+	releaseTagFetch := make(chan struct{})
+	gui.registriesState.tagSource = &fakeTagSource{
+		fn: func(ctx context.Context, item *registryItem) ([]registryTag, error) {
+			<-releaseTagFetch
+			return []registryTag{
+				{Name: "stale-tag", Digest: "sha256:1111111111111111111111111111111111111111111111111111111111111111"},
+			}, nil
+		},
+	}
+
+	// Drill into repositories
+	if err := gui.handleRegistriesEnter(gui.g, gui.Views.Registries); err != nil {
+		t.Fatalf("handleRegistriesEnter: %s", err)
+	}
+	waitUntil(t, 2*time.Second, func() bool {
+		return gui.Panels.Registries.List.Len() == 1
+	}, "repo not loaded")
+
+	// Drill into tags
+	if err := gui.handleRegistriesEnter(gui.g, gui.Views.Registries); err != nil {
+		t.Fatalf("handleRegistriesEnter: %s", err)
+	}
+
+	// Pop back immediately while tag fetch is pending
+	if err := gui.handleRegistriesEscape(gui.g, gui.Views.Registries); err != nil {
+		t.Fatalf("handleRegistriesEscape: %s", err)
+	}
+
+	// Verify we are back at repository level
+	if gui.Views.Registries.Title != "Registries › docker.io" {
+		t.Fatalf("Title = %q; want Registries › docker.io", gui.Views.Registries.Title)
+	}
+	if got := gui.Panels.Registries.List.Len(); got != 1 {
+		t.Fatalf("List.Len() = %d; want 1 repo", got)
+	}
+
+	// Release the slow tag fetch
+	close(releaseTagFetch)
+	time.Sleep(50 * time.Millisecond)
+
+	// List must remain the 1 repository and title must not change
+	if gui.Views.Registries.Title != "Registries › docker.io" {
+		t.Fatalf("Title after stale tags = %q; want Registries › docker.io", gui.Views.Registries.Title)
+	}
+	if got := gui.Panels.Registries.List.Len(); got != 1 {
+		t.Fatalf("List.Len() after stale tags = %d; want 1 repo", got)
+	}
+	repo, err := gui.Panels.Registries.GetSelectedItem()
+	if err != nil || repo.Kind != registryKindRepository {
+		t.Fatalf("GetSelectedItem() = %+v; want repo", repo)
+	}
+}
+
+// L4.2: Esc with an active filter clears the filter first, keeping the tag list;
+// a second Esc pops back up to the repository level.
+func TestRegistriesTagsDrillEscWithFilterClearsFilterFirst(t *testing.T) {
+	gui := newHeadlessRegistriesTestGui(t)
+	if err := gui.switchFocus(gui.Views.Registries); err != nil {
+		t.Fatalf("switchFocus: %s", err)
+	}
+
+	gui.Panels.Registries.SetItems([]*registryItem{
+		{Kind: registryKindRegistry, Host: "docker.io", Username: "user", Status: registryItemStatusOnline},
+	})
+	gui.Panels.Registries.SetSelectedLineIdx(0)
+
+	gui.registriesState.repoSource = &fakeRepoSource{
+		fn: func(ctx context.Context, item *registryItem) ([]registryRepository, error) {
+			return []registryRepository{{Name: "library/alpine"}}, nil
+		},
+	}
+	gui.registriesState.tagSource = &fakeTagSource{
+		fn: func(ctx context.Context, item *registryItem) ([]registryTag, error) {
+			return []registryTag{
+				{Name: "3.18"},
+				{Name: "3.19"},
+				{Name: "edge"},
+				{Name: "latest"},
+			}, nil
+		},
+	}
+
+	// Drill into repo
+	if err := gui.handleRegistriesEnter(gui.g, gui.Views.Registries); err != nil {
+		t.Fatalf("handleRegistriesEnter (repo): %s", err)
+	}
+	waitUntil(t, 2*time.Second, func() bool {
+		return gui.Panels.Registries.List.Len() == 1
+	}, "repo not loaded")
+
+	// Drill into tags
+	if err := gui.handleRegistriesEnter(gui.g, gui.Views.Registries); err != nil {
+		t.Fatalf("handleRegistriesEnter (tags): %s", err)
+	}
+	waitUntil(t, 2*time.Second, func() bool {
+		return gui.Panels.Registries.List.Len() == 4
+	}, "tags not loaded")
+
+	// Apply filter for "3."
+	gui.State.Filter.active = true
+	gui.State.Filter.panel = gui.Panels.Registries
+	_ = gui.onNewFilterNeedle("3.")
+
+	if got := gui.Panels.Registries.List.Len(); got != 2 {
+		t.Fatalf("filtered tags Len() = %d; want 2", got)
+	}
+
+	// First Esc: must clear the filter, keeping tags level
+	if err := gui.handleRegistriesEscape(gui.g, gui.Views.Registries); err != nil {
+		t.Fatalf("handleRegistriesEscape (1): %s", err)
+	}
+	if gui.State.Filter.active {
+		t.Fatal("Filter.active = true; want false")
+	}
+	if got := gui.Panels.Registries.List.Len(); got != 4 {
+		t.Fatalf("tags Len() after filter clear = %d; want 4", got)
+	}
+	if gui.Views.Registries.Title != "Registries › docker.io › library/alpine" {
+		t.Fatalf("Title = %q; want tag level title", gui.Views.Registries.Title)
+	}
+
+	// Second Esc: pops back to repository level
+	if err := gui.handleRegistriesEscape(gui.g, gui.Views.Registries); err != nil {
+		t.Fatalf("handleRegistriesEscape (2): %s", err)
+	}
+	if gui.Views.Registries.Title != "Registries › docker.io" {
+		t.Fatalf("Title = %q; want repo level title", gui.Views.Registries.Title)
+	}
+	if got := gui.Panels.Registries.List.Len(); got != 1 {
+		t.Fatalf("repos Len() = %d; want 1", got)
+	}
+}
+
+// L4.2: Tag source delegates to the appropriate client per registry kind.
+func TestRegistriesTagSourceSelectionPerKind(t *testing.T) {
+	gui := newHeadlessRegistriesTestGui(t)
+
+	// 1. Generic registry
+	var genericCalledWithHost, genericCalledWithRepo string
+	srcGeneric := &defaultTagSource{
+		listGeneric: func(ctx context.Context, host, repository string, opts registry.Options) ([]registryTag, error) {
+			genericCalledWithHost = host
+			genericCalledWithRepo = repository
+			return []registryTag{{Name: "v1"}}, nil
+		},
+	}
+	tags, err := srcGeneric.ListTags(context.Background(), &registryItem{
+		Kind:       registryKindRepository,
+		Host:       "registry.local:5000",
+		Repository: "myteam/app",
+	})
+	if err != nil || len(tags) != 1 || tags[0].Name != "v1" {
+		t.Fatalf("ListTags generic = %+v, %v; want [v1]", tags, err)
+	}
+	if genericCalledWithHost != "registry.local:5000" || genericCalledWithRepo != "myteam/app" {
+		t.Fatalf("generic called with %q, %q; want registry.local:5000, myteam/app", genericCalledWithHost, genericCalledWithRepo)
+	}
+	genericDisplay := gui.getRegistriesDisplayStrings(&registryItem{
+		Kind:       registryKindTag,
+		Host:       "registry.local:5000",
+		Repository: "myteam/app",
+		Tag:        "v1",
+	})
+	if len(genericDisplay) != 1 || genericDisplay[0] != "v1" {
+		t.Fatalf("genericDisplay = %+v; want [v1]", genericDisplay)
+	}
+
+	// 2. Docker Hub
+	var hubNamespace, hubRepo string
+	fixedTime := time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
+	srcHub := &defaultTagSource{
+		listDockerHub: func(ctx context.Context, opts dockerhub.Options, namespace, repository string) ([]registryTag, error) {
+			hubNamespace = namespace
+			hubRepo = repository
+			return []registryTag{
+				{
+					Name:        "alpine",
+					Digest:      "sha256:hubdigest1234567890abcdef",
+					LastUpdated: fixedTime,
+					FullSize:    52428800, // 52.4MB
+				},
+			}, nil
+		},
+	}
+	tagsHub, err := srcHub.ListTags(context.Background(), &registryItem{
+		Kind:       registryKindRepository,
+		Host:       "docker.io",
+		Repository: "library/alpine",
+	})
+	if err != nil || len(tagsHub) != 1 || tagsHub[0].Name != "alpine" {
+		t.Fatalf("ListTags hub = %+v, %v; want [alpine]", tagsHub, err)
+	}
+	if hubNamespace != "library" || hubRepo != "alpine" {
+		t.Fatalf("hub called with ns=%q repo=%q; want library, alpine", hubNamespace, hubRepo)
+	}
+	hubDisplay := gui.getRegistriesDisplayStrings(&registryItem{
+		Kind:        registryKindTag,
+		Host:        "docker.io",
+		Repository:  "library/alpine",
+		Tag:         "alpine",
+		Digest:      "sha256:hubdigest1234567890abcdef",
+		LastUpdated: fixedTime,
+		FullSize:    52428800,
+	})
+	// Docker Hub display: tag, size, date
+	if len(hubDisplay) != 3 || hubDisplay[0] != "alpine" || hubDisplay[1] != "52.43MB" || hubDisplay[2] != "2026-10-20" {
+		t.Fatalf("hubDisplay = %+v; want [alpine 52.43MB 2026-10-20]", hubDisplay)
+	}
+
+	// 3. GHCR
+	var ghcrOwner, ghcrPkg string
+	srcGHCR := &defaultTagSource{
+		listGHCR: func(ctx context.Context, opts ghcr.Options, owner, pkg string) ([]registryTag, error) {
+			ghcrOwner = owner
+			ghcrPkg = pkg
+			return []registryTag{
+				{
+					Name:   "v2.1",
+					Digest: "sha256:ghcrdigest0123456789abcdef",
+				},
+			}, nil
+		},
+	}
+	tagsGHCR, err := srcGHCR.ListTags(context.Background(), &registryItem{
+		Kind:       registryKindRepository,
+		Host:       "ghcr.io",
+		Repository: "octocat/hello-world",
+	})
+	if err != nil || len(tagsGHCR) != 1 || tagsGHCR[0].Name != "v2.1" {
+		t.Fatalf("ListTags ghcr = %+v, %v; want [v2.1]", tagsGHCR, err)
+	}
+	if ghcrOwner != "octocat" || ghcrPkg != "hello-world" {
+		t.Fatalf("ghcr called with owner=%q pkg=%q; want octocat, hello-world", ghcrOwner, ghcrPkg)
+	}
+	ghcrDisplay := gui.getRegistriesDisplayStrings(&registryItem{
+		Kind:       registryKindTag,
+		Host:       "ghcr.io",
+		Repository: "octocat/hello-world",
+		Tag:        "v2.1",
+		Digest:     "sha256:ghcrdigest0123456789abcdef",
+	})
+	// GHCR display: tag, short digest
+	if len(ghcrDisplay) != 2 || ghcrDisplay[0] != "v2.1" || ghcrDisplay[1] != "ghcrdigest01" {
+		t.Fatalf("ghcrDisplay = %+v; want [v2.1 ghcrdigest01]", ghcrDisplay)
+	}
+}
+
+// L4.2: Errors from tag listing render in the main view and set NoItemsMessage.
+func TestRegistriesTagsDrillListingErrorRendersInMainView(t *testing.T) {
+	gui := newHeadlessRegistriesTestGui(t)
+	if err := gui.switchFocus(gui.Views.Registries); err != nil {
+		t.Fatalf("switchFocus: %s", err)
+	}
+
+	gui.Panels.Registries.SetItems([]*registryItem{
+		{Kind: registryKindRegistry, Host: "docker.io", Username: "user", Status: registryItemStatusOnline},
+	})
+	gui.registriesState.repoSource = &fakeRepoSource{
+		fn: func(ctx context.Context, item *registryItem) ([]registryRepository, error) {
+			return []registryRepository{{Name: "broken/repo"}}, nil
+		},
+	}
+	gui.registriesState.tagSource = &fakeTagSource{
+		fn: func(ctx context.Context, item *registryItem) ([]registryTag, error) {
+			return nil, errors.New("dockerhub: tag list rate limit exceeded")
+		},
+	}
+
+	// Enter repo
+	if err := gui.handleRegistriesEnter(gui.g, gui.Views.Registries); err != nil {
+		t.Fatalf("handleRegistriesEnter (repo): %s", err)
+	}
+	waitUntil(t, 2*time.Second, func() bool {
+		return gui.Panels.Registries.List.Len() == 1
+	}, "repo not loaded")
+
+	// Enter tags
+	if err := gui.handleRegistriesEnter(gui.g, gui.Views.Registries); err != nil {
+		t.Fatalf("handleRegistriesEnter (tags): %s", err)
+	}
+
+	waitUntil(t, 2*time.Second, func() bool {
+		level := gui.registriesState.currentDrillLevel()
+		return level != nil && level.err != ""
+	}, "error not recorded on level")
+
+	level := gui.registriesState.currentDrillLevel()
+	if level.err != "dockerhub: tag list rate limit exceeded" {
+		t.Fatalf("level.err = %q; want rate limit error", level.err)
+	}
+	if gui.Panels.Registries.NoItemsMessage != "dockerhub: tag list rate limit exceeded" {
+		t.Fatalf("NoItemsMessage = %q; want rate limit error", gui.Panels.Registries.NoItemsMessage)
+	}
+	// Title loading suffix removed
+	if gui.Views.Registries.Title != "Registries › docker.io › broken/repo" {
+		t.Fatalf("Title = %q; want loading suffix removed on error", gui.Views.Registries.Title)
+	}
+}
+
+// L4.2: Refreshing with 'r' at tag level reloads tags with (loading…) suffix and updates list.
+func TestRegistriesTagsRefreshReloadsTags(t *testing.T) {
+	gui := newHeadlessRegistriesTestGui(t)
+	if err := gui.switchFocus(gui.Views.Registries); err != nil {
+		t.Fatalf("switchFocus: %s", err)
+	}
+
+	gui.Panels.Registries.SetItems([]*registryItem{
+		{Kind: registryKindRegistry, Host: "docker.io", Username: "user", Status: registryItemStatusOnline},
+	})
+	gui.registriesState.repoSource = &fakeRepoSource{
+		fn: func(ctx context.Context, item *registryItem) ([]registryRepository, error) {
+			return []registryRepository{{Name: "library/redis"}}, nil
+		},
+	}
+
+	callCount := 0
+	gui.registriesState.tagSource = &fakeTagSource{
+		fn: func(ctx context.Context, item *registryItem) ([]registryTag, error) {
+			callCount++
+			if callCount == 1 {
+				return []registryTag{{Name: "6.0"}}, nil
+			}
+			return []registryTag{{Name: "6.0"}, {Name: "7.0"}}, nil
+		},
+	}
+
+	// Drill into repo
+	if err := gui.handleRegistriesEnter(gui.g, gui.Views.Registries); err != nil {
+		t.Fatalf("handleRegistriesEnter (repo): %s", err)
+	}
+	waitUntil(t, 2*time.Second, func() bool {
+		return gui.Panels.Registries.List.Len() == 1
+	}, "repo not loaded")
+
+	// Drill into tags
+	if err := gui.handleRegistriesEnter(gui.g, gui.Views.Registries); err != nil {
+		t.Fatalf("handleRegistriesEnter (tags): %s", err)
+	}
+	waitUntil(t, 2*time.Second, func() bool {
+		return gui.Panels.Registries.List.Len() == 1
+	}, "tags not loaded")
+
+	// Press 'r' to refresh
+	if err := gui.handleRegistriesRefresh(gui.g, gui.Views.Registries); err != nil {
+		t.Fatalf("handleRegistriesRefresh: %s", err)
+	}
+
+	waitUntil(t, 2*time.Second, func() bool {
+		return gui.Panels.Registries.List.Len() == 2
+	}, "refreshed tags not loaded")
+
+	if callCount != 2 {
+		t.Fatalf("callCount = %d; want 2", callCount)
+	}
+	if gui.Views.Registries.Title != "Registries › docker.io › library/redis" {
+		t.Fatalf("Title = %q; want Registries › docker.io › library/redis", gui.Views.Registries.Title)
 	}
 }

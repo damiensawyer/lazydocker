@@ -87,6 +87,12 @@ type registryItem struct {
 	// Repository-kind fields (L4.1).
 	Repository string
 	Visibility string
+
+	// Tag-kind fields (L4.2).
+	Tag         string
+	Digest      string
+	LastUpdated time.Time
+	FullSize    int64
 }
 
 // credentialFromSecret maps a resolved credentials.Secret onto the registry

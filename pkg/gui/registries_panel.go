@@ -8,11 +8,13 @@ import (
 	"github.com/fatih/color"
 	"github.com/jesseduffield/gocui"
 	"github.com/jesseduffield/lazydocker/pkg/gui/panels"
+	"github.com/jesseduffield/lazydocker/pkg/gui/presentation"
 	"github.com/jesseduffield/lazydocker/pkg/registry"
 	"github.com/jesseduffield/lazydocker/pkg/registry/connections"
 	"github.com/jesseduffield/lazydocker/pkg/registry/credentials"
 	"github.com/jesseduffield/lazydocker/pkg/tasks"
 	"github.com/jesseduffield/lazydocker/pkg/utils"
+	"github.com/opencontainers/go-digest"
 	"github.com/sasha-s/go-deadlock"
 )
 
@@ -62,6 +64,8 @@ type registriesState struct {
 	drillStack []*registriesDrillLevel
 	// repoSource overrides the default repository source in tests.
 	repoSource repositorySource
+	// tagSource overrides the default tag source in tests.
+	tagSource tagSource
 	// updateUIFn overrides gui.g.Update in tests (e.g. headless tests without an event loop).
 	updateUIFn func(func(*gocui.Gui) error)
 }
@@ -125,6 +129,9 @@ func (gui *Gui) getRegistriesPanel() *panels.SideListPanel[*registryItem] {
 			// re-renders the summary of the selected row (the periodic
 			// checkForContextChange calls HandleSelect every second).
 			GetItemContextCacheKey: func(item *registryItem) string {
+				if item.Kind == registryKindTag {
+					return "tag-" + item.Host + "-" + item.Repository + "-" + item.Tag + "-" + item.Digest + "-" + item.Err
+				}
 				if item.Kind == registryKindRepository {
 					return "repo-" + item.Host + "-" + item.Repository + "-" + item.Visibility + "-" + item.Err
 				}
@@ -138,6 +145,9 @@ func (gui *Gui) getRegistriesPanel() *panels.SideListPanel[*registryItem] {
 		NoItemsMessage: gui.Tr.NoRegistries,
 		Gui:            gui.intoInterface(),
 		Sort: func(a, b *registryItem) bool {
+			if a.Kind == registryKindTag && b.Kind == registryKindTag {
+				return a.Tag < b.Tag
+			}
 			if a.Kind == registryKindRepository && b.Kind == registryKindRepository {
 				return a.Repository < b.Repository
 			}
@@ -145,6 +155,9 @@ func (gui *Gui) getRegistriesPanel() *panels.SideListPanel[*registryItem] {
 		},
 		GetTableCells: gui.getRegistriesDisplayStrings,
 		GetItemKey: func(item *registryItem) string {
+			if item.Kind == registryKindTag {
+				return item.Host + "/" + item.Repository + ":" + item.Tag
+			}
 			if item.Kind == registryKindRepository {
 				return item.Host + "/" + item.Repository
 			}
@@ -173,6 +186,9 @@ func (gui *Gui) registriesSummaryStr(item *registryItem) string {
 	if item == nil {
 		return ""
 	}
+	if item.Kind == registryKindTag {
+		return gui.tagSummaryStr(item)
+	}
 	if item.Kind == registryKindRepository {
 		return gui.repositorySummaryStr(item)
 	}
@@ -184,6 +200,27 @@ func (gui *Gui) registriesSummaryStr(item *registryItem) string {
 	output += utils.WithPadding(gui.Tr.RegistriesSummaryStatus, padding) + utils.Decolorise(gui.registriesStatusDisplay(item.Status)) + "\n"
 	if d := registriesDurationDisplay(item.Duration); d != "" {
 		output += utils.WithPadding(gui.Tr.RegistriesSummaryResponseTime, padding) + d + "\n"
+	}
+	if item.Err != "" {
+		output += "\n" + item.Err + "\n"
+	}
+	return output
+}
+
+func (gui *Gui) tagSummaryStr(item *registryItem) string {
+	padding := 15
+	output := ""
+	output += utils.WithPadding(gui.Tr.RegistriesSummaryRegistry, padding) + item.Host + "\n"
+	output += utils.WithPadding(gui.Tr.RegistriesSummaryRepository, padding) + item.Repository + "\n"
+	output += utils.WithPadding(gui.Tr.TagSummaryTag, padding) + item.Tag + "\n"
+	if item.Digest != "" {
+		output += utils.WithPadding(gui.Tr.TagSummaryDigest, padding) + item.Digest + "\n"
+	}
+	if item.FullSize > 0 {
+		output += utils.WithPadding(gui.Tr.TagSummaryTotalSize, padding) + utils.FormatDecimalBytes(int(item.FullSize)) + "\n"
+	}
+	if !item.LastUpdated.IsZero() {
+		output += utils.WithPadding(gui.Tr.TagSummaryCreated, padding) + item.LastUpdated.Format(time.RFC3339) + "\n"
 	}
 	if item.Err != "" {
 		output += "\n" + item.Err + "\n"
@@ -206,6 +243,9 @@ func (gui *Gui) repositorySummaryStr(item *registryItem) string {
 }
 
 func (gui *Gui) getRegistriesDisplayStrings(item *registryItem) []string {
+	if item.Kind == registryKindTag {
+		return gui.tagDisplayStrings(item)
+	}
 	if item.Kind == registryKindRepository {
 		if item.Visibility != "" {
 			return []string{
@@ -221,6 +261,30 @@ func (gui *Gui) getRegistriesDisplayStrings(item *registryItem) []string {
 		gui.registriesStatusDisplay(item.Status),
 		gui.registriesHostDisplay(item),
 		item.Username,
+	}
+}
+
+func (gui *Gui) tagDisplayStrings(item *registryItem) []string {
+	kind := registryKindForItem(item)
+	switch kind {
+	case connections.KindDockerHub:
+		dateStr := "-"
+		if !item.LastUpdated.IsZero() {
+			dateStr = item.LastUpdated.Format("2006-01-02")
+		}
+		sizeStr := "-"
+		if item.FullSize > 0 {
+			sizeStr = utils.FormatDecimalBytes(int(item.FullSize))
+		}
+		return []string{item.Tag, sizeStr, dateStr}
+	case connections.KindGHCR:
+		shortDigest := "-"
+		if item.Digest != "" {
+			shortDigest = presentation.ShortDigest(digest.Digest(item.Digest))
+		}
+		return []string{item.Tag, shortDigest}
+	default:
+		return []string{item.Tag}
 	}
 }
 
@@ -281,6 +345,16 @@ func (gui *Gui) handleRegistriesRefresh(g *gocui.Gui, v *gocui.View) error {
 		level := gui.registriesState.currentDrillLevel()
 		if level != nil && level.item != nil {
 			gen := gui.registriesState.bumpGeneration()
+			if level.kind == registryKindTag {
+				gui.Panels.Registries.NoItemsMessage = gui.Tr.NoTags
+				gui.Panels.Registries.SetItems([]*registryItem{})
+				if gui.Views.Registries != nil {
+					gui.Views.Registries.Title = level.title + " (loading…)"
+				}
+				_ = gui.Panels.Registries.RerenderList()
+				gui.loadTags(gen, level.item)
+				return nil
+			}
 			gui.Panels.Registries.NoItemsMessage = gui.Tr.NoRepositories
 			gui.Panels.Registries.SetItems([]*registryItem{})
 			_ = gui.Panels.Registries.RerenderList()
@@ -303,6 +377,9 @@ func (gui *Gui) handleRegistriesEnter(g *gocui.Gui, v *gocui.View) error {
 
 	if item.Kind == registryKindRegistry {
 		return gui.drillIntoRegistry(item)
+	}
+	if item.Kind == registryKindRepository {
+		return gui.drillIntoRepository(item)
 	}
 
 	return gui.handleEnterMain(g, v)
@@ -337,6 +414,38 @@ func (gui *Gui) drillIntoRegistry(item *registryItem) error {
 	_ = gui.Panels.Registries.RerenderList()
 
 	gui.loadRepositories(gen, item)
+	return nil
+}
+
+func (gui *Gui) drillIntoRepository(item *registryItem) error {
+	if gui.State.Filter.active {
+		_ = gui.clearFilter()
+	}
+
+	prevItems := gui.Panels.Registries.List.GetAllItems()
+	prevSelectedIdx := gui.Panels.Registries.SelectedIdx
+
+	gui.registriesState.mu.Lock()
+	gui.registriesState.generation++
+	gen := gui.registriesState.generation
+	level := &registriesDrillLevel{
+		kind:        registryKindTag,
+		title:       gui.Tr.RegistriesTitle + " › " + item.Host + " › " + item.Repository,
+		item:        item,
+		items:       prevItems,
+		selectedIdx: prevSelectedIdx,
+	}
+	gui.registriesState.drillStack = append(gui.registriesState.drillStack, level)
+	gui.registriesState.mu.Unlock()
+
+	if gui.Views.Registries != nil {
+		gui.Views.Registries.Title = level.title + " (loading…)"
+	}
+	gui.Panels.Registries.NoItemsMessage = gui.Tr.NoTags
+	gui.Panels.Registries.SetItems([]*registryItem{})
+	_ = gui.Panels.Registries.RerenderList()
+
+	gui.loadTags(gen, item)
 	return nil
 }
 
@@ -376,7 +485,11 @@ func (gui *Gui) popRegistriesDrill() error {
 		if gui.Views.Registries != nil {
 			gui.Views.Registries.Title = parentLevel.title
 		}
-		gui.Panels.Registries.NoItemsMessage = gui.Tr.NoRepositories
+		if parentLevel.kind == registryKindTag {
+			gui.Panels.Registries.NoItemsMessage = gui.Tr.NoTags
+		} else {
+			gui.Panels.Registries.NoItemsMessage = gui.Tr.NoRepositories
+		}
 	}
 
 	gui.Panels.Registries.SetItems(popped.items)
@@ -443,10 +556,13 @@ func (gui *Gui) applyRepositories(gen uint64, parentItem *registryItem, repos []
 	items := make([]*registryItem, len(repos))
 	for i, r := range repos {
 		items[i] = &registryItem{
-			Kind:       registryKindRepository,
-			Host:       parentItem.Host,
-			Repository: r.Name,
-			Visibility: r.Visibility,
+			Kind:         registryKindRepository,
+			Host:         parentItem.Host,
+			Repository:   r.Name,
+			Visibility:   r.Visibility,
+			Username:     parentItem.Username,
+			AutoDetected: parentItem.AutoDetected,
+			Connection:   parentItem.Connection,
 		}
 	}
 
@@ -455,6 +571,74 @@ func (gui *Gui) applyRepositories(gen uint64, parentItem *registryItem, repos []
 	if len(items) == 0 {
 		_ = gui.QueueTask(gui.NewSimpleRenderStringTask(func() string {
 			return gui.Tr.NoRepositories
+		}))
+	} else if gui.IsCurrentView(gui.Views.Registries) {
+		_ = gui.Panels.Registries.HandleSelect()
+	}
+	_ = gui.Panels.Registries.RerenderList()
+}
+
+func (gui *Gui) loadTags(gen uint64, item *registryItem) {
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		source := gui.getTagSource()
+		tags, err := source.ListTags(ctx, item)
+
+		gui.updateUI(func(*gocui.Gui) error {
+			gui.applyTags(gen, item, tags, err)
+			return nil
+		})
+	}()
+}
+
+func (gui *Gui) applyTags(gen uint64, parentItem *registryItem, tags []registryTag, err error) {
+	if !gui.registriesState.isCurrent(gen) {
+		return
+	}
+	level := gui.registriesState.currentDrillLevel()
+	if level == nil || level.item != parentItem || level.kind != registryKindTag {
+		return
+	}
+
+	if gui.Views.Registries != nil {
+		gui.Views.Registries.Title = level.title
+	}
+
+	if err != nil {
+		level.err = err.Error()
+		gui.Panels.Registries.NoItemsMessage = err.Error()
+		gui.Panels.Registries.SetItems([]*registryItem{})
+		_ = gui.QueueTask(gui.NewSimpleRenderStringTask(func() string {
+			return err.Error()
+		}))
+		_ = gui.Panels.Registries.RerenderList()
+		return
+	}
+
+	level.err = ""
+	items := make([]*registryItem, len(tags))
+	for i, t := range tags {
+		items[i] = &registryItem{
+			Kind:         registryKindTag,
+			Host:         parentItem.Host,
+			Repository:   parentItem.Repository,
+			Tag:          t.Name,
+			Digest:       t.Digest,
+			LastUpdated:  t.LastUpdated,
+			FullSize:     t.FullSize,
+			Username:     parentItem.Username,
+			AutoDetected: parentItem.AutoDetected,
+			Connection:   parentItem.Connection,
+		}
+	}
+
+	gui.Panels.Registries.NoItemsMessage = gui.Tr.NoTags
+	gui.Panels.Registries.SetItems(items)
+	if len(items) == 0 {
+		_ = gui.QueueTask(gui.NewSimpleRenderStringTask(func() string {
+			return gui.Tr.NoTags
 		}))
 	} else if gui.IsCurrentView(gui.Views.Registries) {
 		_ = gui.Panels.Registries.HandleSelect()
