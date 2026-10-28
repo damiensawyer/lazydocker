@@ -64,6 +64,24 @@ type UserConfig struct {
 	// will be filtered out and not displayed.
 	// Not documented because it's subject to change
 	Ignore []string `yaml:"ignore,omitempty"`
+
+	// Registries configures the remote-registry side panel (the crtui mashup:
+	// browsing and managing images on registries you are logged in to)
+	Registries RegistriesConfig `yaml:"registries,omitempty"`
+}
+
+// RegistriesConfig configures the Registries side panel.
+type RegistriesConfig struct {
+	// Enabled controls whether the Registries side panel is shown at all.
+	// Defaults to true — this fork exists for that panel. Set
+	// `registries: { enabled: false }` to hide it and get stock lazydocker
+	// back. Either way nothing is read or contacted until the panel is first
+	// focused (D-09), so a hidden panel costs nothing.
+	//
+	// NOTE on the missing omitempty: an explicit `enabled: false` must
+	// survive a config rewrite (WriteToUserConfig re-encodes the whole user
+	// config), and omitempty would drop a false bool on write.
+	Enabled bool `yaml:"enabled"`
 }
 
 // ThemeConfig is for setting the colors of panels and some text.
@@ -482,6 +500,9 @@ func GetDefaultConfig() UserConfig {
 		},
 		Replacements: Replacements{
 			ImageNamePrefixes: map[string]string{},
+		},
+		Registries: RegistriesConfig{
+			Enabled: true,
 		},
 	}
 }

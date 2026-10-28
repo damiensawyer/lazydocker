@@ -38,7 +38,7 @@ Locks change by the minute — `board.sh` beats this table.
 | N | Task |
 | --- | --- |
 | ~~B1~~ | ~~**L1.1**~~ landed (glm, 87cd5ab); review fix rides with L1.2 |
-| B2 | **L3.1** Registries side panel. `[medium \| F-0001, F-0020, S-03, S-04]` — footprint `pkg/gui/registries_panel*.go`, `pkg/gui/gui.go`, `pkg/gui/arrangement.go`, `pkg/gui/keybindings.go`, `pkg/gui/views.go`, `pkg/config/app_config.go`, `pkg/i18n/english.go` |
+| ~~B2~~ | ~~**L3.1**~~ Registries side panel. `[medium \| F-0001, F-0020, S-03, S-04]` — footprint `pkg/gui/registries_panel*.go`, `pkg/gui/gui.go`, `pkg/gui/arrangement.go`, `pkg/gui/keybindings.go`, `pkg/gui/views.go`, `pkg/config/app_config.go`, `pkg/i18n/english.go` |
 
 ### Light — anyone
 
