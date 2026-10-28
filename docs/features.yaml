@@ -1,0 +1,312 @@
+---
+# =============================================================================
+# LAZYDOCKER (crtui mashup) — FEATURE CATALOGUE
+# =============================================================================
+# The single source of truth for what the fork does today and what it will do.
+# docs/REGISTRY_PLAN.md cites these ids; plan-check.py refuses a task citing an
+# id that is not here. The one rule that must never break: an id is permanent,
+# never reused, never changed, and encodes nothing.
+#
+# Source of the planned rows: crtui's README feature list
+# (github.com/ksckaan1/crtui), minus what lazydocker already has, plus the
+# mashup-only rows (F-0022..F-0024). Nothing is `existing` until it is checked
+# against the real tree — an aspirational `existing` row is a bug in this file.
+# =============================================================================
+
+meta:
+  product: lazydocker (crtui mashup)
+  version: 0.1
+  updated: 2026-10-28
+  next_id: 25          # take this for the next new feature, then increment
+  statuses: [existing, planned, proposed, parked, dropped]
+  actors: [user]
+  areas:
+    registry: Registry connections, credentials and status
+    repository: Browsing repositories and tags on a remote registry
+    tag: Mutating remote tags and repositories
+    inspection: Inspecting what an image is before pulling it
+    ux: User experience shared by every registry surface
+    integration: Where registry browsing meets lazydocker's local world
+
+features:
+  # --- registry ------------------------------------------------------------
+  - id: F-0001
+    slug: list-registries
+    name: List registries with connection status
+    area: registry
+    status: planned
+    actors: [user]
+    today: >
+      A Registries side panel lists every configured and auto-detected
+      registry with its live status (online / offline / unauthorized) and
+      response time.
+    value: The front door of the mashup. Everything else starts from this list.
+
+  - id: F-0002
+    slug: add-registry
+    name: Add a registry connection
+    area: registry
+    status: planned
+    actors: [user]
+    today: >
+      A form (lazydocker popup) creates a connection with URL, username and
+      password or token.
+    value: Brings private registries (Harbor, self-hosted registry:2) in.
+
+  - id: F-0003
+    slug: edit-registry
+    name: Edit a registry connection
+    area: registry
+    status: planned
+    actors: [user]
+    today: >
+      The same form edits an existing connection's URL, username or
+      credential.
+    value: Rotated tokens do not require hand-editing config files.
+
+  - id: F-0004
+    slug: delete-registry
+    name: Delete a registry connection
+    area: registry
+    status: planned
+    actors: [user]
+    today: >
+      A confirmation flow removes a saved connection (never an auto-detected
+      one).
+    value: Keeps the connection list clean.
+
+  - id: F-0005
+    slug: auto-detect-credentials
+    name: Auto-detect Docker/Podman credentials
+    area: registry
+    status: planned
+    actors: [user]
+    today: >
+      Registries from ~/.docker/config.json and
+      ~/.config/containers/auth.json appear automatically, including
+      credentials held by credential helpers (docker-credential-secretservice
+      et al). They are read-only — never editable, never re-saved.
+    value: >
+      Zero-config first run. Your existing logins just work.
+
+  - id: F-0006
+    slug: ghcr-browsing
+    name: GitHub Container Registry (ghcr.io) browsing
+    area: registry
+    status: planned
+    actors: [user]
+    today: >
+      ghcr.io connections list packages via the GitHub API (a packages:read
+      token), marked PUBLIC/PRIVATE, using the OCI bearer flow for registry
+      operations.
+    value: First-class GitHub packages browsing without leaving the TUI.
+
+  - id: F-0007
+    slug: dockerhub-browsing
+    name: Docker Hub browsing
+    area: registry
+    status: planned
+    actors: [user]
+    today: >
+      Docker Hub connections list repositories via hub.docker.com (no catalog
+      endpoint there), anonymous or token-authed, marked PUBLIC/PRIVATE.
+    value: Docker Hub is where most images live; it needs its own client.
+
+  - id: F-0008
+    slug: generic-registry-catalog
+    name: Generic OCI registry support (registry:2, Harbor)
+    area: registry
+    status: planned
+    actors: [user]
+    today: >
+      Any OCI Distribution-conformant registry works — /v2/_catalog, tag
+      lists, manifests — over basic or bearer auth.
+    value: The baseline client everything else reuses.
+
+  # --- repository ----------------------------------------------------------
+  - id: F-0009
+    slug: browse-repositories
+    name: Browse a registry's repositories with search/filter
+    area: repository
+    status: planned
+    actors: [user]
+    today: >
+      Selecting a registry drills into its repositories, instantly filterable
+      as you type (lazydocker's existing filter idiom).
+    value: Finding one image among thousands.
+
+  - id: F-0010
+    slug: view-tags
+    name: View a repository's tags
+    area: repository
+    status: planned
+    actors: [user]
+    today: >
+      Selecting a repository lists its tags, filterable the same way.
+    value: The level where version choice happens.
+
+  # --- tag (remote mutations) ----------------------------------------------
+  - id: F-0011
+    slug: delete-repository
+    name: Delete a remote repository (all tags)
+    area: tag
+    status: planned
+    actors: [user]
+    today: >
+      With typed confirmation, every tag in a repository is deleted via the
+      registry API.
+    value: Cleanup of dead repositories without a shell full of curl.
+
+  - id: F-0012
+    slug: delete-tags
+    name: Delete individual or multiple remote tags
+    area: tag
+    status: planned
+    actors: [user]
+    today: >
+      Tags are multi-selectable and deleted via the registry API, behind a
+      confirmation.
+    value: Pruning old builds is the most common remote maintenance task.
+
+  # --- inspection ------------------------------------------------------------
+  - id: F-0013
+    slug: tag-details-platforms
+    name: Multi-platform tag details
+    area: inspection
+    status: planned
+    actors: [user]
+    today: >
+      An index manifest's platforms (linux/amd64, linux/arm64, …) are listed
+      and each can be inspected separately.
+    value: >
+      arm hosts are common; "what does this tag run on" is the first
+      question.
+
+  - id: F-0014
+    slug: tag-total-size
+    name: Total image size
+    area: inspection
+    status: planned
+    actors: [user]
+    today: >
+      A tag's summary shows the full compressed size across layers (per
+      platform).
+    value: The number people actually compare before pulling.
+
+  - id: F-0015
+    slug: tag-config-inspection
+    name: Image config inspection (env, entrypoint, cmd, workdir, user, labels)
+    area: inspection
+    status: planned
+    actors: [user]
+    today: >
+      The config blob is rendered in the main view — environment variables,
+      Entrypoint, CMD, working dir, user, OCI labels.
+    value: Knowing what a container will do before running it.
+
+  - id: F-0016
+    slug: tag-layers
+    name: Layer listing with sizes
+    area: inspection
+    status: planned
+    actors: [user]
+    today: >
+      Every layer with its media type and compressed size.
+    value: Explains where the size comes from; pairs with history.
+
+  - id: F-0017
+    slug: tag-history
+    name: Build history
+    area: inspection
+    status: planned
+    actors: [user]
+    today: >
+      The history array — created-by commands, authors, dates, empty-layer
+      markers.
+    value: Reads like a Dockerfile; shows how the image was built.
+
+  - id: F-0018
+    slug: tag-rootfs
+    name: RootFS digests
+    area: inspection
+    status: planned
+    actors: [user]
+    today: >
+      RootFS type and layer digests for diff and audit work.
+    value: Verifiable identity of the filesystem content.
+
+  # --- ux --------------------------------------------------------------------
+  - id: F-0019
+    slug: copy-pull-command
+    name: Copy the exact docker pull command
+    area: ux
+    status: planned
+    actors: [user]
+    today: >
+      One keypress copies the pull command for the selected tag to the
+      clipboard.
+    value: The bridge back to the shell.
+
+  - id: F-0020
+    slug: refresh
+    name: Manual refresh of registry data
+    area: ux
+    status: planned
+    actors: [user]
+    today: >
+      The registry, repository or tag list re-fetches on demand (lazydocker's
+      refresh key), never silently while you browse.
+    value: Stale lists are worse than no list.
+
+  - id: F-0021
+    slug: status-feedback
+    name: Status feedback and loading indicators
+    area: ux
+    status: planned
+    actors: [user]
+    today: >
+      Every registry network operation shows a status line (lazydocker's app
+      status) and renders results or errors with operation duration.
+    value: >
+      Registry calls are slow; visible progress is the difference between a
+      tool and a hang.
+
+  # --- integration (mashup-only) ----------------------------------------------
+  - id: F-0022
+    slug: pull-remote-tag
+    name: Pull a remote tag into local images
+    area: integration
+    status: planned
+    actors: [user]
+    today: >
+      From a tag, one keypress runs docker pull through lazydocker's existing
+      machinery, with live progress in the main view; the image then appears
+      in the Images panel.
+    value: >
+      The point of the mashup — browse remote, pull local, manage it, all in
+      one place.
+
+  - id: F-0023
+    slug: run-remote-tag
+    name: Create a container from a remote tag
+    area: integration
+    status: planned
+    actors: [user]
+    today: >
+      From a tag, pull-if-missing then create a container (custom command
+      preset), landing it in the Containers panel.
+    value: Browse, then run, without memorizing image names.
+
+  - id: F-0024
+    slug: saved-connections-config
+    name: Saved connections and config schema
+    area: registry
+    status: planned
+    actors: [user]
+    today: >
+      Registry connections saved by F-0002 live in their own file
+      (~/.config/lazydocker/registries.yml, mode 0600), with a documented
+      schema; passwords are written only on explicit save.
+    value: >
+      Persistence for connections without touching lazydocker's main config
+      contract.

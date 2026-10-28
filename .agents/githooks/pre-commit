@@ -1,0 +1,272 @@
+#!/usr/bin/env bash
+# V0.22 — the guard, at the one door nothing can walk around.
+#
+# Five plan/file sweeps in one night, and the fifth — `ebfabec9` — took a colleague's HELD
+# security fix through `git commit --allow-empty`: a commit whose author believed it carried
+# nothing, inheriting five staged files from the shared index. Every check the board owns
+# (guard.sh check 1, V0.21, V0.17) worked that night and every one is skipped by typing
+# `git commit`. A hook does not care what the committer believed; that is the point.
+#
+# WHAT IT DOES. If the commit would carry anything (the index this commit is being built
+# from differs from HEAD), it runs `guard.sh` as the agent named by $BOARD_AGENT and blocks
+# on refusal. `commit.sh` exports BOARD_AGENT for you; a raw `git commit` must say who it is.
+#
+#   BOARD_AGENT=<your board id> git commit ...     # a raw commit, owned
+#   git commit --no-verify ...                     # the explicit override — visible, greppable,
+#                                                  # and what you type INSTEAD of wishing the
+#                                                  # guard had an escape hatch. Say why in the body.
+#
+# WHAT IT DELIBERATELY DOES NOT DO. An empty-index commit (a message-only coordination commit,
+# the safe form opus-4 documented) passes silently — a hook that nags on every `release:` commit
+# gets --no-verify'd into meaninglessness within a week. Message-rule checks (V0.17/V0.21) live
+# in commit.sh for `commit.sh`/`claim.sh` callers, because a pre-commit hook cannot see the
+# message to check it there.
+#
+# V0.27: that left a raw `git commit` free of every message rule — `BOARD_AGENT=opus-3 git
+# commit --only -m "probe F" -- <path>` landed with no `[id]`, no `Agent:`, no `Co-Authored-By`,
+# because nothing downstream of `commit.sh` re-checks the message. `.agents/githooks/commit-msg`
+# now closes that door — same `core.hooksPath`, the one hook that DOES see the message — so a
+# raw commit is held to V0.17 too. This file still owns FOOTPRINT (guard.sh, check 2); it does
+# not duplicate commit-msg's checks.
+#
+# During `git commit --only -- <paths>` git points GIT_INDEX_FILE at a temporary index holding
+# exactly those paths, and this hook (and guard.sh under it) reads that — so the hook judges
+# precisely what will land, for --only, bare, --amend and --allow-empty commits alike.
+set -uo pipefail
+cd "$(git rev-parse --show-toplevel)" || exit 1
+# WHICH PROJECT'S BOARD GUARDS THIS COMMIT (multi-project, 2026-09-07).
+# Each project owns `.agents/<project>/board` and `MiscDocs/<project>/`. These hooks are
+# repo-wide and cannot infer the project from the staged paths — a commit may touch shared
+# `lib-common` and nothing else. So the board names itself: every board entry point exports
+# BOARD_PROJECT from its own location, and a commit made through commit.sh arrives already
+# labelled. A raw `git commit` gets `tickets`, the branch this machinery was built on.
+# Guarding against the WRONG board would read another project's locks and refuse work that
+# is not conflicting at all, so this resolves explicitly rather than guessing.
+BOARD_PROJECT=${BOARD_PROJECT:-}
+if [ -z "$BOARD_PROJECT" ] || [ ! -d ".agents/$BOARD_PROJECT/board" ]; then
+	# Nothing named a project, or it named one this checkout does not have. If exactly ONE
+	# board exists the answer is not a guess, so take it — that is a single-project checkout
+	# and the shape every selftest fixture builds. With two or more present and nothing
+	# choosing, fall back to `lazydocker` rather than picking a board at random.
+	_n=0; _one=
+	for _b in .agents/*/board; do
+		[ -d "$_b" ] && { _n=$((_n + 1)); _one=$_b; }
+	done
+	if [ "$_n" -eq 1 ]; then
+		BOARD_PROJECT=${_one#.agents/}; BOARD_PROJECT=${BOARD_PROJECT%/board}
+	else
+		BOARD_PROJECT=lazydocker
+	fi
+fi
+BOARD=.agents/$BOARD_PROJECT/board
+[ -d "$BOARD" ] || exit 0 # a branch without the board has nothing to guard
+# The plan the board guards. Its name differs per project (REGISTRY_PLAN.md,
+# GUMSHOE_PLAN.md, ...), so the board records it in one place rather than each caller
+# knowing the convention.
+PLAN=$(cat "$BOARD/plan-path" 2>/dev/null) || PLAN=docs/REGISTRY_PLAN.md
+
+# Empty index = a message-only commit carries nothing worth guarding. (--amend with a clean
+# index also lands here: it can rewrite a message but cannot pick up anyone's staged work.)
+git diff --cached --quiet && exit 0
+
+agent=${BOARD_AGENT:-}
+if [ -z "$agent" ]; then
+	echo "pre-commit (V0.22): this commit would carry staged changes, and nothing says who is committing." >&2
+	echo "  Agents: use $BOARD/commit.sh (it sets BOARD_AGENT), or prefix a raw commit" >&2
+	echo "  with BOARD_AGENT=<your board id>. A human committing by hand: BOARD_AGENT=human, or" >&2
+	echo "  git commit --no-verify and say why in the body." >&2
+	echo "  Staged right now (a shared index — some of this may not be yours):" >&2
+	git diff --cached --name-only | sed 's/^/    /' >&2
+	exit 1
+fi
+
+[ "$agent" = human ] && exit 0 # the user's own hands; the board's rules bind agents
+
+guard_out=$("$BOARD"/guard.sh "$agent" 2>&1); guard_rc=$?
+printf '%s\n' "$guard_out" >&2
+[ $guard_rc -eq 0 ] && exit 0
+
+# V0.41 — A MERGE IS NOT A SWEEP, AND THIS HOOK COULD NOT TELL THE DIFFERENCE.
+#
+# `worktree.sh finish` merges `origin/mydev` into a task branch so conflicts surface in the
+# agent's own worktree. When that merge conflicts, `finish` prints its own recovery — "git add
+# <them>; BOARD_AGENT=<you> git commit" — and this hook refused that exact command:
+#
+#   FAIL: .agents/lazydocker/board/review-queue.sh is inside sonnet-2's claim on V0.26a
+#   FAIL: your staged docs/REGISTRY_PLAN.md diff touches V0.26a, which sonnet-2 holds
+#
+# Both were sonnet-2's ALREADY LANDED, ALREADY PUSHED commits arriving through the merge —
+# the one mechanism by which they are supposed to reach a task branch. `guard.sh` compares the
+# staged set against colleagues' claims and cannot see that this staged set IS their landed work.
+#
+# Why it had to be fixed rather than tolerated: V0.30 concludes that the per-task worktree is the
+# answer to the shared-checkout wipes, and V0.22 concludes that a hook is the answer to agents
+# going round the wrapper. Those collide here — the more an agent follows V0.30, the more merges
+# it does, and every conflicted one ended in `--no-verify`. Six of them in one `opus-4` session.
+# An override that a CORRECT workflow requires routinely stops being a signal, which is the
+# argument V0.22's own row makes for having the hook at all.
+#
+# What is skipped and what is not. FOOTPRINT refusals (guard checks 1-3) are meaningless during a
+# merge and are downgraded to a note. A plan-check refusal is about CONTENT — the resolved file
+# you are about to commit — and still blocks, because a conflict resolution is exactly where a
+# plan row gets mangled (V0.31, V0.44, V0.46 are all that shape).
+#
+# `git rev-parse --git-dir`, never a literal `.git/MERGE_HEAD` path: in a linked worktree the git
+# dir is `…/.git/worktrees/<name>/`, and a path test passes in the primary checkout and fails for
+# everyone else — the bug V0.29 hit in `prepare-commit-msg` and pinned with hooks-selftest probe
+# 8. This uses `rev-parse -q --verify MERGE_HEAD`, which is worktree-correct by construction.
+# V0.67 — the exemption's own justification, enforced instead of assumed. V0.41 excuses
+# footprint FAILs during a merge because they are "colleagues' LANDED commits arriving the way
+# they are supposed to" — but it excused EVERY footprint FAIL with no look at content, so a
+# resolution that wrote NOVEL bytes into a colleague's claimed file (matching neither parent
+# nor anything that path has ever held) committed silently. The V0.33-class staging race is
+# commonest exactly while a merge is being resolved. So: a footprint FAIL is excused only when
+# the staged blob for its path is one the merge could legitimately have produced — one of the
+# TWO PARENTS' blobs (V0.78 narrowed this from V0.67's any-historical-blob test: an ancestor
+# blob silently REVERTS what the colleague landed since, and is as foreign to a resolution as
+# novel bytes).
+# A novel blob inside a colleague's claim still refuses, with the path named.
+blob_ok_for_merge() { # <path>
+	local staged c
+	if ! staged=$(git rev-parse -q --verify ":0:$1" 2>/dev/null); then
+		# Deleted in the resolution: legitimate when either parent also lacks it (their landed
+		# deletion, or ours, arriving). Deleting a file BOTH parents still carry is novel.
+		if git cat-file -e "MERGE_HEAD:$1" 2>/dev/null && git cat-file -e "HEAD:$1" 2>/dev/null; then
+			return 1
+		fi
+		return 0
+	fi
+	[ "$(git rev-parse -q --verify "MERGE_HEAD:$1" 2>/dev/null)" = "$staged" ] && return 0
+	[ "$(git rev-parse -q --verify "HEAD:$1" 2>/dev/null)" = "$staged" ] && return 0
+	# V0.78 — the TWO PARENTS' blobs only, not "any blob history holds". V0.67's first cut kept
+	# the wider historical test (the V0.56 precedent its row cited), and REVIEW-V0.67 named the
+	# hole: a resolution staging an ANCESTOR blob is neither parent, silently REVERTS whatever
+	# the colleague landed since, and pushes as an ordinary fast-forward nobody downstream
+	# questions. A legitimate resolution picks a parent; ancient bytes are as foreign to this
+	# merge as novel ones. (V0.56's own context keeps its wider test — refreshing a stale
+	# working-tree copy is a different question with different failure modes.)
+	# docs/REGISTRY_PLAN.md is different by nature: a LEGITIMATE conflict resolution of the plan is
+	# a novel COMBINATION (two agents' §21 rows both kept), so the blob test would refuse the
+	# exact flow V0.41 exists to allow. The honest per-line version of the same question: every
+	# LINE of the staged plan must exist in one parent or the other. A combination passes; a row
+	# MANGLED in resolution — edited text matching neither parent — is a novel line and refuses.
+	if [ "$1" = "$PLAN" ]; then
+		local novel_lines
+		novel_lines=$(comm -23 \
+			<(git show ":0:$1" 2>/dev/null | sort -u) \
+			<(cat <(git show "HEAD:$1" 2>/dev/null) <(git show "MERGE_HEAD:$1" 2>/dev/null) | sort -u) \
+			| head -3)
+		[ -z "$novel_lines" ] && return 0
+	fi
+	return 1
+}
+
+in_merge=0
+if git rev-parse -q --verify MERGE_HEAD >/dev/null 2>&1; then
+	in_merge=1
+	merge_blocked=0
+	novel_paths=""
+	checked_paths=" "
+	while IFS= read -r line; do
+		case "$line" in
+			FAIL:*plan-check.py*) merge_blocked=1; continue ;;
+		esac
+		# V0.67 — pull the path out of each path-bearing footprint FAIL and blob-test it.
+		# (The pathless "no live claim" FAIL stays blanket-excused as before: it names no
+		# colleague's work, and the claims-and-locks shapes below are the ones that can take it.)
+		p=""
+		case "$line" in
+			"FAIL: staging "*"never write another agent's lock"*)
+				p=${line#FAIL: staging }; p=${p%% —*} ;;
+			"FAIL: your staged $PLAN diff touches"*)
+				p=$PLAN ;;
+			"FAIL: "*" is inside "*)
+				p=${line#FAIL: }; p=${p%% is inside *} ;;
+		esac
+		[ -n "$p" ] || continue
+		case "$checked_paths" in *" $p "*) continue ;; esac
+		checked_paths="$checked_paths$p "
+		blob_ok_for_merge "$p" || novel_paths="$novel_paths $p"
+	done <<< "$guard_out"
+	if [ -n "$novel_paths" ]; then
+		echo "pre-commit (V0.67): MERGE IN PROGRESS, but the staged content for the path(s) below" >&2
+		echo "  matches NEITHER parent (HEAD nor MERGE_HEAD) — that is not a" >&2
+		echo "  colleague's landed work arriving, it is novel content inside their claim, and the" >&2
+		echo "  merge exemption does not cover it:" >&2
+		for p in $novel_paths; do echo "    $p" >&2; done
+		echo "  Resolve the file to one of its real versions, or leave it out of this commit and" >&2
+		echo "  land your own change under your own claim after the merge." >&2
+		exit 1
+	fi
+	if [ "$merge_blocked" = 0 ]; then
+		echo "pre-commit (V0.41): MERGE IN PROGRESS — the footprint refusals above are this merge's" >&2
+		echo "  incoming changes, which are colleagues' LANDED commits arriving the way they are" >&2
+		echo "  supposed to. Not a sweep. Allowed (V0.67: every flagged path's staged blob matched" >&2
+		echo "  a parent or that path's own history)." >&2
+		exit 0
+	fi
+	echo "pre-commit (V0.41): merge in progress, so footprint refusals were set aside — but" >&2
+	echo "  plan-check refused on CONTENT, which a merge resolution can genuinely break." >&2
+fi
+
+# V0.28 — commit.sh's declared override reaches the hook too, or it is not an override at all:
+# this hook re-runs the same guard against the index being committed, so without this it would
+# refuse the very commit commit.sh just approved and the agent would be back at --no-verify.
+# The same narrowing applies here, re-derived rather than trusted: ONLY a plan-check refusal can
+# be overridden. Any other FAIL is about taking work that is not yours and this flag is inert
+# against it, however loudly the environment asks.
+#
+# V0.28a (REVIEW-V0.28 finding 1) — AND THE REASON MUST NAME AN ID, exactly as the flag demands.
+# Until this, the hook took `BOARD_GUARD_OVERRIDE` as any non-empty string and applied no second
+# test, so `BOARD_GUARD_OVERRIDE=x git commit --only -- …` walked past a plan-check refusal
+# naming nothing at all, while `commit.sh --override-guard` refused the same reason and, when it
+# accepted one, wrote it into the commit body. The hook's door was WIDER than the flag's — and
+# an env var that reads as sanctioned is worse than `--no-verify`, which at least announces
+# itself. `guard_fail_ids` is the shared parser; one rule, two callers (V0.29's lesson).
+#
+# What this still cannot do is RECORD the override: a pre-commit hook never sees the message.
+# So the trace stays commit.sh's job, and the honest summary is that the hook now verifies an
+# override it cannot document. Narrowing the door was the half that was reachable from here.
+if [ -n "${BOARD_GUARD_OVERRIDE:-}" ]; then
+	if ! . "$BOARD"/override.sh 2>/dev/null; then
+		echo "pre-commit (V0.28a): $BOARD/override.sh is missing — an override" >&2
+		echo "  cannot be evaluated, so it is not honoured. Fix the refusal, or --no-verify." >&2
+		BOARD_GUARD_OVERRIDE=
+	fi
+fi
+if [ -n "${BOARD_GUARD_OVERRIDE:-}" ]; then
+	overridable=1
+	while IFS= read -r line; do
+		case "$line" in
+			FAIL:*plan-check.py*) ;;
+			# V0.41 — during a merge the footprint refusals were ALREADY set aside above, so they
+			# must not poison overridability here too. Found by landing V0.41 itself: the merge
+			# that lands this file was excused on footprint, refused on a plan-check duplicate
+			# that belongs to `V0.53`, and then could not use the narrow override — because this
+			# loop was still counting the footprint FAILs the block above had just forgiven. A
+			# merge that hits BOTH kinds had no exit but `--no-verify`, which is the one thing
+			# V0.41 exists to stop.
+			FAIL:*) [ "$in_merge" = 1 ] || overridable=0 ;;
+		esac
+	done <<< "$guard_out"
+	if [ "$overridable" = 1 ]; then
+		if printf '%s\n' "$guard_out" | override_names_a_fail_id "$BOARD_GUARD_OVERRIDE"; then
+			echo "pre-commit (V0.28): guard override accepted — $BOARD_GUARD_OVERRIDE" >&2
+			exit 0
+		fi
+		echo "pre-commit (V0.28a): BOARD_GUARD_OVERRIDE names none of the ids the guard refused on." >&2
+		echo "  An override has to be aimed at the problem that was raised. It must name one of:" >&2
+		printf '%s\n' "$guard_out" | guard_fail_ids | sed 's/^/    /' >&2
+		echo "  (Ids from the WARNING block do not count — the guard said those are not blocking.)" >&2
+	else
+		echo "pre-commit (V0.28): BOARD_GUARD_OVERRIDE ignored — this refusal is not a plan-check one." >&2
+	fi
+fi
+
+echo >&2
+echo "pre-commit (V0.22): THE GUARD REFUSED — nothing was committed." >&2
+echo "  Fix what it named. If you are certain it is wrong, the override is --no-verify," >&2
+echo "  stated in the commit body — not a workaround it cannot see." >&2
+echo "  For a plan-check refusal that is not yours to fix, the narrow, recorded exit is" >&2
+echo "  commit.sh <agent> --override-guard \"<reason naming the id>\" (V0.28)." >&2
+exit 1

@@ -1,0 +1,145 @@
+#!/usr/bin/env bash
+# V0.27 — the ATTRIBUTION door, closed. pre-commit (V0.22) guards footprint; it cannot guard
+# the MESSAGE, because git never hands a message to pre-commit. The rules commit.sh enforces
+# (V0.17: a `[<id>]` subject, an `Agent:` trailer, a `Co-Authored-By:` matching agents.tsv)
+# therefore lived only inside a wrapper — measured before this hook existed:
+#
+#   BOARD_AGENT=opus-3 git commit --only -m "probe F" -- docs/IDEAS.md
+#
+# succeeded, landing a commit with none of the three. That is README failure 5 again
+# ("three commits carry no Co-Authored-By at all, so the work is unattributable"), reopened
+# through a door V0.22's own row had declared shut. commit-msg is the one hook that DOES see
+# the message, and it is the same one-line-of-setup as core.hooksPath (already armed by
+# claim.sh/board.sh) — so this is the fix, not a new mechanism.
+#
+# WHAT IT DOES. Refuses the commit unless (merges, detected via MERGE_HEAD, and
+# BOARD_AGENT=human excepted):
+#   * the subject starts with a `[...]` tag,
+#   * the body carries `Agent: <id>` naming a row in agents.tsv, and
+#   * the body carries `Co-Authored-By: <that row's exact model string>`.
+# Both commit.sh and claim.sh already emit exactly this shape (V0.17), so neither breaks — this
+# task's own commits went through both, with the hook armed, as the test.
+#
+# The `Agent:` id is read from the MESSAGE, not from $BOARD_AGENT — so "no Agent: at all" (the
+# actual observed failure) is refused even from a raw commit that never sets the env var. When
+# BOARD_AGENT *is* set (commit.sh/claim.sh always set it; a raw commit is asked to per
+# pre-commit's own instructions) it must agree with the trailer, so nobody can commit under a
+# colleague's name.
+#
+# WHAT IT DELIBERATELY DOES NOT DO. It cannot stop `--no-verify`, and `BOARD_AGENT=human` is
+# exempt by the same reasoning pre-commit already uses ("the user's own hands; the board's
+# rules bind agents") — a human is not their own Co-Authored-By. Both are doors this hook
+# cannot close from the client side; `audit-history.sh` is the backstop, because it reads what
+# actually landed on the shared branch and a bypass cannot un-happen there.
+#
+# V0.29 — but the human exemption now STAMPS `Agent: human` rather than passing silently, so the
+# backstop can tell "the user's own hands" from "an agent that wrote no trailer". Which `Agent:`
+# line counts is decided in one place, `.agents/lazydocker/board/attribution.sh`, which this hook
+# and `commit.sh` both source: the LAST `Agent:` line, so a trailer quoted earlier in the body
+# cannot shadow the real one. Both were REVIEW-V0.27 findings.
+set -uo pipefail
+cd "$(git rev-parse --show-toplevel)" || exit 1
+# WHICH PROJECT'S BOARD GUARDS THIS COMMIT (multi-project, 2026-09-07).
+# Each project owns `.agents/<project>/board` and `MiscDocs/<project>/`. These hooks are
+# repo-wide and cannot infer the project from the staged paths — a commit may touch shared
+# `lib-common` and nothing else. So the board names itself: every board entry point exports
+# BOARD_PROJECT from its own location, and a commit made through commit.sh arrives already
+# labelled. A raw `git commit` gets `tickets`, the branch this machinery was built on.
+# Guarding against the WRONG board would read another project's locks and refuse work that
+# is not conflicting at all, so this resolves explicitly rather than guessing.
+BOARD_PROJECT=${BOARD_PROJECT:-}
+if [ -z "$BOARD_PROJECT" ] || [ ! -d ".agents/$BOARD_PROJECT/board" ]; then
+	# Nothing named a project, or it named one this checkout does not have. If exactly ONE
+	# board exists the answer is not a guess, so take it — that is a single-project checkout
+	# and the shape every selftest fixture builds. With two or more present and nothing
+	# choosing, fall back to `lazydocker` rather than picking a board at random.
+	_n=0; _one=
+	for _b in .agents/*/board; do
+		[ -d "$_b" ] && { _n=$((_n + 1)); _one=$_b; }
+	done
+	if [ "$_n" -eq 1 ]; then
+		BOARD_PROJECT=${_one#.agents/}; BOARD_PROJECT=${BOARD_PROJECT%/board}
+	else
+		BOARD_PROJECT=lazydocker
+	fi
+fi
+BOARD=.agents/$BOARD_PROJECT/board
+[ -d "$BOARD" ] || exit 0 # a branch without the board has nothing to guard
+# The plan the board guards. Its name differs per project (REGISTRY_PLAN.md,
+# GUMSHOE_PLAN.md, ...), so the board records it in one place rather than each caller
+# knowing the convention.
+PLAN=$(cat "$BOARD/plan-path" 2>/dev/null) || PLAN=docs/REGISTRY_PLAN.md
+
+msg_file=${1:-}
+[ -n "$msg_file" ] && [ -f "$msg_file" ] || exit 0
+# git's commit-msg hook takes ONE argument (the message file) — a $2 "source" is
+# prepare-commit-msg's signature, not this hook's, so checking it here never fires. Caught
+# live: worktree.sh finish's own `git merge --no-edit origin/mydev` was refused by this hook
+# over its own auto-generated "Merge remote-tracking branch …" subject, on the very row meant
+# to exempt merges. `git rev-parse -q --verify MERGE_HEAD` is the real signal — MERGE_HEAD
+# exists for exactly the duration a merge commit is being built, across bare, worktree and
+# linked-worktree layouts alike (unlike testing for a `.git/MERGE_HEAD` path, which breaks in
+# any linked worktree since `.git` there is a file, not a directory).
+git rev-parse -q --verify MERGE_HEAD >/dev/null 2>&1 && exit 0  # README: no single agent's work to attribute
+
+refuse() {
+	echo "commit-msg (V0.27): REFUSING — $1" >&2
+	echo "  $BOARD/commit.sh and claim.sh already emit a compliant message;" >&2
+	echo "  a raw commit needs the same three things by hand (README, commit discipline)." >&2
+	exit 1
+}
+
+# Sourced, not reimplemented — and its ABSENCE is refused rather than tolerated. Without this
+# test a missing library would leave `message_agent` undefined, every message would parse as
+# having no trailer, and the hook would refuse the whole fleet with a reason that names the
+# wrong problem. Say the real one.
+[ -f "$BOARD"/attribution.sh ] \
+	|| refuse "attribution.sh is missing — the shared 'which Agent: line counts' library (V0.29)."
+. "$BOARD"/attribution.sh
+
+# V0.29 — THE HUMAN EXEMPTION NOW LEAVES A TRACE, and that is the whole change.
+#
+# It used to `exit 0` here and write nothing, so the commit that landed was indistinguishable
+# from an unattributed agent commit — and `audit-history.sh`, whose entire job is to read what
+# LANDED, reported it `FAIL … no 'Agent:' trailer` on every run from then on, permanently, with
+# no way back to green (REVIEW-V0.27 finding 2). A CI-shaped check that goes red on PERMITTED
+# behaviour and stays red is one nobody reads within a week.
+#
+# So the exemption is a trailer, decided once and honoured in both files: this hook stamps
+# `Agent: human` when it is missing, and the backstop skips a commit carrying it. The user still
+# types nothing and is still refused nothing — appending is not refusing — and the history says
+# on its face which door each commit came through.
+if [ "${BOARD_AGENT:-}" = "$HUMAN_AGENT" ]; then
+	if [ -z "$(message_agent < "$msg_file")" ]; then
+		printf '\nAgent: %s\n' "$HUMAN_AGENT" >> "$msg_file"
+	fi
+	exit 0
+fi
+
+msg=$(cat "$msg_file")
+subject=$(printf '%s\n' "$msg" | sed -n '1p')
+
+case "$subject" in
+	\[*\]*) ;;
+	*) refuse "the subject must start with a [<task-id>] tag (\"$subject\")." ;;
+esac
+
+# V0.29 — one parser, shared with commit.sh, so the two cannot disagree about which `Agent:`
+# line counts. This used to take the FIRST such line ANYWHERE in the message, which a quoted
+# note above the trailers (`claim.sh`'s own shape) shadows; `attribution.sh` takes the LAST such
+# line instead. Measured before the fix: a message with `Agent: sonnet` inside a quoted
+# note and `Agent: opus-4` as its real trailer was refused here and accepted by commit.sh.
+agent=$(printf '%s\n' "$msg" | message_agent)
+[ -n "$agent" ] || refuse "the message must carry an 'Agent: <id>' trailer (roster rule 1b)."
+
+if [ -n "${BOARD_AGENT:-}" ] && [ "$BOARD_AGENT" != "$agent" ]; then
+	refuse "BOARD_AGENT=$BOARD_AGENT but the message says 'Agent: $agent' — they must match."
+fi
+
+model=$(agent_model "$agent")
+[ -n "$model" ] || refuse "'Agent: $agent' does not name a row in agents.tsv."
+
+printf '%s\n' "$msg" | grep -qF "Co-Authored-By: $model" \
+	|| refuse "the message must carry 'Co-Authored-By: $model <...>' — agents.tsv's exact model string for '$agent', not a harness default."
+
+exit 0

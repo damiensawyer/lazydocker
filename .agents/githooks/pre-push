@@ -1,0 +1,238 @@
+#!/usr/bin/env bash
+# V0.55 — the shared branch cannot be deleted or rewound by an accident of shell quoting.
+#
+# THE INCIDENT (2026-09-05 ~23:41). An agent split "resolve base → commit-tree → push" across
+# two Bash tool calls; the second call's $newcommit was empty, so
+#     git push origin "$newcommit":refs/heads/tickets
+# became `git push origin :refs/heads/tickets` — git's DELETE-REF syntax — and GitHub printed
+# `- [deleted] tickets`. The whole fleet's branch, gone on an empty variable. Recovery held
+# (the next agent's routine sync merged the true history back), but only because the deletion
+# was caught in the same turn and every commit had been pushed promptly. The agent's own fix —
+# "I will hard-assert 40-hex before pushing" — is a sentence, and this board's entire history
+# says load-bearing sentences do not hold. So the rule moves here, where it binds everyone.
+#
+# WHICH BRANCHES (V11.16, then the 2026-09-14 trunk flip). Originally `refs/heads/tickets`.
+# Then each project had a long-lived branch. Now every board-branch is `main`, and the
+# product names (`tickets` / `gumshoe` / `fp` / `ct`) are release pointers. The protected
+# set is `main` plus those release refs: `board-branch` equal to `main` means the project
+# *slug* is still protected (deletion, rewind, and the cherry check below). A project
+# scaffolded by `.agents/new-project.sh` is protected the moment it exists. A board may name
+# further release pointers in `.agents/<project>/board/release-refs` (E10.4). Falls back to
+# `tickets` if no board is readable, which is the pre-V11.16 behaviour and never less safe.
+#
+# WHAT THIS REFUSES, for a protected branch only (task branches stay free):
+#   1. DELETION — a push whose local sha is the zero-sha. There is no legitimate agent reason
+#      to delete main or a release pointer, ever.
+#   2. NON-FAST-FORWARD — when the remote sha is known locally and is not an ancestor of what
+#      is being pushed. That is a rewind: a force-push or a history rewrite, both of which the
+#      README bans in bold. When the remote object is not known locally the server decides, as
+#      it always did; this is belt, not authority.
+#   3. ORIGINAL COMMITS ON A RELEASE REF — `git cherry origin/mydev <sha>` showing a `+` line.
+#      Permits a cherry-pick (equivalent patch on mydev) and a fast-forward of a main sha.
+#      Catches a fix authored only on `tickets`/`gumshoe`/`fp`/`ct`, which is what rots the
+#      model. Main itself is not subject to this check.
+#
+# pre-push stdin: "<local ref> <local sha> <remote ref> <remote sha>" per updated ref.
+# The override, as everywhere in this hook family, is --no-verify with the reason in writing —
+# and for THIS hook, GitHub branch protection is the layer --no-verify cannot reach; it is on
+# the user's [human] list.
+set -uo pipefail
+
+zero=0000000000000000000000000000000000000000
+
+# The protected set: main, every board-branch, and — when board-branch is main — the
+# project slug as a release pointer. Computed once per push.
+protected_branches() {
+	local root b found=0 proj name
+	root=$(git rev-parse --show-toplevel 2>/dev/null) || root=.
+	echo mydev
+	for b in "$root"/.agents/*/board/board-branch; do
+		[ -f "$b" ] || continue
+		proj=$(basename "$(dirname "$(dirname "$b")")")
+		# one bare branch name per file; ignore anything that is not one
+		while read -r name _; do
+			case "$name" in ""|*[!A-Za-z0-9._/-]*) continue ;; esac
+			echo "$name"
+			if [ "$name" = main ] && [ -n "$proj" ] && [ "$proj" != main ]; then
+				echo "$proj"
+			fi
+			found=1
+		done < "$b"
+	done
+	[ "$found" = 1 ] || echo lazydocker
+	# E10.4 — extra release pointers a board ships from (e.g. ecm-ios, which triggers the
+	# iOS TestFlight build). One bare branch name per line in .agents/<project>/board/release-refs.
+	for b in "$root"/.agents/*/board/release-refs; do
+		[ -f "$b" ] || continue
+		while read -r name _; do
+			case "$name" in ""|"#"*|*[!A-Za-z0-9._/-]*) continue ;; esac
+			echo "$name"
+		done < "$b"
+	done
+}
+PROTECTED="${PRE_PUSH_PROTECTED_OVERRIDE:-$(protected_branches)}"
+
+is_protected() { # <branch name>
+	local b
+	for b in $PROTECTED; do [ "$b" = "$1" ] && return 0; done
+	return 1
+}
+
+# check_refs reads pre-push stdin lines and prints refusals; returns non-zero on any.
+# Split out of the main loop so --self-test can drive it with synthetic lines (V0.69).
+check_refs() {
+	local fail=0 local_ref local_sha remote_ref remote_sha
+	while read -r local_ref local_sha remote_ref remote_sha; do
+		# V0.69 — work/* branches: DELETION refused, everything else free. Between
+		# `worktree.sh start` and `finish`, a pushed work/<agent>/<task> branch can hold
+		# commits that exist on no other remote ref, so one stray `--delete` is V0.30's
+		# unrecoverable-loss class with a shorter fuse. Rewind stays free: an agent amending
+		# its own unlanded branch is ordinary. This cannot break the tooling — measured, not
+		# assumed: `worktree.sh abandon` deletes only LOCALLY (`git branch -D`, line ~180),
+		# `finish` pushes `HEAD:mydev`, and nothing in `.agents/` pushes a work/* deletion.
+		# A deliberate remote cleanup goes through --no-verify with the reason in writing,
+		# like every other override in this hook family.
+		case "$remote_ref" in
+		refs/heads/work/*)
+			if [ "$local_sha" = "$zero" ]; then
+				echo "pre-push (V0.69): REFUSING to DELETE $remote_ref." >&2
+				echo "  A work/* branch between worktree start and finish holds commits that exist" >&2
+				echo "  nowhere else. If this is a deliberate cleanup of a LANDED branch, push with" >&2
+				echo "  --no-verify and say why in writing; rewinds of your own branch stay free." >&2
+				fail=1
+			fi
+			continue
+			;;
+		refs/heads/*)
+			is_protected "${remote_ref#refs/heads/}" || continue
+			;;
+		*) continue ;;
+		esac
+
+		if [ "$local_sha" = "$zero" ]; then
+			echo "pre-push (V0.55): REFUSING to DELETE $remote_ref." >&2
+			echo "  This is a protected branch (a project branch or the trunk mydev). If you meant to push a" >&2
+			echo "  commit, your source ref" >&2
+			echo "  is EMPTY — the exact empty-variable accident of 2026-09-05. Re-derive your sha" >&2
+			echo "  in the same shell invocation and push again." >&2
+			fail=1
+			continue
+		fi
+
+		# BELT, not protection (V0.69): this arm cannot fire today. Git resolves the source
+		# refspec before pre-push runs and dies on anything unresolvable ("src refspec ... does
+		# not match any"), so the hook only ever sees a resolved sha or the zero-sha (handled
+		# above). Kept against a future git that hands something else through.
+		if ! printf '%s' "$local_sha" | grep -qE '^[0-9a-f]{40}$'; then
+			echo "pre-push (V0.55): REFUSING — source for $remote_ref is not a 40-hex sha ('$local_sha')." >&2
+			fail=1
+			continue
+		fi
+
+		if [ "$remote_sha" != "$zero" ] && git cat-file -e "$remote_sha" 2>/dev/null; then
+			if ! git merge-base --is-ancestor "$remote_sha" "$local_sha" 2>/dev/null; then
+				echo "pre-push (V0.55): REFUSING a non-fast-forward push to $remote_ref." >&2
+				echo "  The remote tip $remote_sha is not an ancestor of what you are pushing —" >&2
+				echo "  that rewinds the shared branch (force-push / rewrite, banned in the README)." >&2
+				echo "  Merge origin/${remote_ref#refs/heads/} and push again." >&2
+				fail=1
+			fi
+		fi
+
+		# Release pointers only receive work that already exists on mydev. `git cherry`
+		# permits a cherry-pick (same patch-id) and catches an original commit.
+		branch=${remote_ref#refs/heads/}
+		# The trunk (this repo: mydev, per board-branch) is exempt — a push to it IS how
+		# work lands. Everything else protected is a release pointer and gets the cherry
+		# check. (Retargeted from main when this board moved to the mydev trunk.)
+		if [ "$branch" != mydev ] && [ "$fail" -eq 0 ] && git rev-parse -q --verify origin/mydev >/dev/null 2>&1; then
+			if git cherry origin/mydev "$local_sha" 2>/dev/null | grep -q '^+'; then
+				echo "pre-push: REFUSING push to release ref $remote_ref — git cherry origin/mydev shows" >&2
+				echo "  commits with no equivalent on mydev. Land the fix on mydev first, then fast-forward" >&2
+				echo "  or cherry-pick onto the release pointer." >&2
+				fail=1
+			fi
+		fi
+	done
+	return $fail
+}
+
+# --self-test (V0.69): drive check_refs with synthetic stdin, no push and no network. Run as
+#   .agents/githooks/pre-push --self-test
+if [ "${1:-}" = "--self-test" ]; then
+	pass=0; failed=0
+	sha=$(git rev-parse HEAD 2>/dev/null)
+	old=$(git rev-parse HEAD~1 2>/dev/null)
+	# Tickets-as-release-pointer probes must use a sha that IS on origin/mydev, or the
+	# cherry check would refuse a fast-forward of an unpushed local commit.
+	mainsha=$(git rev-parse origin/mydev 2>/dev/null || echo "$sha")
+	mainold=$(git rev-parse origin/mydev~1 2>/dev/null || echo "$old")
+	probe() { # <name> <want_rc> <stdin line>
+		local got=0
+		printf '%s\n' "$3" | check_refs >/dev/null 2>&1 || got=1
+		if [ "$got" = "$2" ]; then pass=$((pass + 1)); echo "  ok   $1"
+		else failed=$((failed + 1)); echo "  FAIL $1 — wanted rc $2, got $got"; fi
+	}
+	probe "deleting refs/heads/tickets is refused" 1 \
+		"refs/heads/tickets $zero refs/heads/tickets $sha"
+	probe "deleting a work/* branch is refused" 1 \
+		"refs/heads/work/x/V0.0 $zero refs/heads/work/x/V0.0 $sha"
+	probe "rewinding a work/* branch stays free" 0 \
+		"refs/heads/work/x/V0.0 $old refs/heads/work/x/V0.0 $sha"
+	probe "a fast-forward of tickets passes" 0 \
+		"refs/heads/tickets $mainsha refs/heads/tickets $mainold"
+	probe "a rewind of tickets is refused" 1 \
+		"refs/heads/tickets $old refs/heads/tickets $sha"
+	probe "deleting an unrelated ref is not this hook's business" 0 \
+		"refs/heads/misc $zero refs/heads/misc $sha"
+	probe "a new tickets ref (zero remote sha) passes" 0 \
+		"refs/heads/tickets $mainsha refs/heads/tickets $zero"
+
+	# V11.16 — the protected set, driven with a fixed override so these probes pin the LOGIC
+	# and not whatever boards happen to exist in the checkout running them.
+	PROTECTED="tickets gumshoe fp main"
+	probe "another project's branch is protected from deletion" 1 \
+		"refs/heads/gumshoe $zero refs/heads/gumshoe $sha"
+	probe "another project's branch is protected from a rewind" 1 \
+		"refs/heads/fp $old refs/heads/fp $sha"
+	probe "a fast-forward of another project's branch passes" 0 \
+		"refs/heads/gumshoe $mainsha refs/heads/gumshoe $mainold"
+	probe "main is protected from deletion" 1 \
+		"refs/heads/mydev $zero refs/heads/mydev $sha"
+	probe "main is protected from a rewind" 1 \
+		"refs/heads/mydev $old refs/heads/mydev $sha"
+	probe "a branch outside the set is still not this hook's business" 0 \
+		"refs/heads/dogbiscuits $zero refs/heads/dogbiscuits $sha"
+	PROTECTED=$(protected_branches)
+	probe "the real checkout's set includes main" 1 \
+		"refs/heads/mydev $zero refs/heads/mydev $sha"
+	probe "the real checkout's set includes the tickets release pointer" 1 \
+		"refs/heads/tickets $zero refs/heads/tickets $sha"
+	if [ -f "$(git rev-parse --show-toplevel)/.agents/ecm/board/release-refs" ]; then
+		probe "a board's release-refs file protects its pointer (ecm-ios)" 1 \
+			"refs/heads/ecm-ios $zero refs/heads/ecm-ios $sha"
+	fi
+
+	# Original commit on a release ref: unique tree, parented on origin/mydev, so it is a
+	# fast-forward of the pointer and still has no equivalent on mydev.
+	if git rev-parse -q --verify origin/mydev >/dev/null 2>&1; then
+		_idx=$(mktemp)
+		_blob=$(printf 'pre-push release-ref cherry probe\n' | git hash-object -w --stdin)
+		GIT_INDEX_FILE=$_idx git read-tree origin/mydev
+		printf '100644 blob %s\tpre-push-release-probe.txt\n' "$_blob" | GIT_INDEX_FILE=$_idx git update-index --index-info
+		_tree=$(GIT_INDEX_FILE=$_idx git write-tree)
+		_orig=$(git commit-tree "$_tree" -p origin/mydev -m "pre-push selftest original on release ref")
+		rm -f "$_idx"
+		PROTECTED="tickets gumshoe fp main"
+		probe "an original commit on a release ref is refused" 1 \
+			"refs/heads/tickets $_orig refs/heads/tickets $mainsha"
+		probe "the same original commit on mydev is not this check's business" 0 \
+			"refs/heads/mydev $_orig refs/heads/mydev $mainsha"
+	fi
+
+	echo "pre-push --self-test: $pass passed, $failed failed."
+	exit "$([ "$failed" -eq 0 ] && echo 0 || echo 1)"
+fi
+
+check_refs
+exit $?

@@ -1,0 +1,20 @@
+# The agent registry. Machine-readable on purpose: this is the ONE place an id's model and
+# tier are recorded. They used to live here AND in each claim file in the board's original
+# home, and they drifted — an agent's commits went out naming a model that had not done the
+# work. One fact, one place.
+#
+# id	tier	model
+opus	heavy	Claude Opus 5.5 (Anthropic, via Claude Code)
+opus-2	heavy	Claude Opus 5.5 (Anthropic, via Claude Code)
+opus-3	heavy	Claude Opus 5.5 (Anthropic, via Claude Code)
+fable	heavy	Claude Fable 5.1 (Anthropic, via Claude Code)
+fable-2	heavy	Claude Fable 5.1 (Anthropic, via Claude Code)
+glm	heavy	GLM 5.3 (Z.ai, via pi)
+glm-2	heavy	GLM 5.3 (Z.ai, via pi)
+glm-flash	medium	GLM 5.3 Flash (Z.ai, via pi)
+glm-flash-2	medium	GLM 5.3 Flash (Z.ai, via pi)
+glm-flash-3	medium	GLM 5.3 Flash (Z.ai, via pi)
+sonnet	medium	Claude Sonnet 5 (Anthropic, via Claude Code)
+sonnet-2	medium	Claude Sonnet 5 (Anthropic, via Claude Code)
+qwen	light	Qwen3 27B (Qwen, via pi / llama.cpp, local)
+qwen-2	light	Qwen3 27B (Qwen, via pi / llama.cpp, local)

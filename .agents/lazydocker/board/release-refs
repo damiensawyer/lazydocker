@@ -1,0 +1,4 @@
+# Extra release pointers for lazydocker (the fork). One branch name per line.
+# Read by .agents/githooks/pre-push, which refuses deleting or rewinding them
+# and any commit on them that is not on mydev. The trunk (mydev) is protected
+# without being listed. None yet.
