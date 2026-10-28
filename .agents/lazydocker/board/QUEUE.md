@@ -17,11 +17,14 @@ move fast once several agents run.
 
 | Who | Task | Footprint |
 | --- | --- | --- |
-| glm | L1.2 (+ L1.1 review fix) | `pkg/registry/*.go`, `pkg/registry/registrytest/**` |
-| glm-2 | L1.4 | `pkg/registry/dockerhub/**` |
-| gemini-2 | L1.5 | `pkg/registry/ghcr/**` |
+| (none — session shut down by the user 2026-10-28 ~21:30) | | |
 
-Locks change by the minute — `board.sh` beats this table.
+## Resume here (2026-10-28 shutdown)
+
+- **L4.2** — WIP on branch `work/gemini-flash-3/L4.2` (dbedc18, builds, tests not re-run). Continue there; the brief also asks for the L5.1 wiring half in the same run.
+- **Quota:** Z.ai GLM 5.3 exhausted (5-hour window), agy Gemini 4 Argon exhausted (~7 days). Gemini 3.8 Flash on agy (`gemini-flash*`) and swift (local) still work.
+- **Next after L4.2:** L5.1 wiring → L4.3 key → L3.3 (swift) → L5.2 → L6.1/L6.2 ⚠️ heavy → L7.1 UI ⚠️ heavy → L7.2 → L8.1, L8.2, GATE.
+- Old worktrees from dead sessions (`glm-L1.2`, `glm-2-L1.4`, `glm-3-L3.1`, `gemini-3-L3.2`, `gemini-L4.3`) are superseded — their work landed through takeovers. Safe to remove with `worktree.sh abandon <agent> <task> --force` once you have looked.
 
 ## Available now
 
