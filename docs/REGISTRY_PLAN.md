@@ -174,7 +174,7 @@ erased from it on connection delete only if lazydocker wrote them. A documented 
 create/update/delete behind a small store API.
 
 - [x] **L2.1 Credential auto-detection.** ⚠️ `[heavy | F-0005,S-02 | after L0.1]`
-- [ ] **L2.2 Saved connections.** ⚠️ `[heavy | F-0024,F-0002,F-0003,F-0004,S-02 | after L2.1]`
+- [x] **L2.2 Saved connections.** ⚠️ `[heavy | F-0024,F-0002,F-0003,F-0004,S-02 | after L2.1]`
 
 ### Phase L3 — the Registries side panel
 
@@ -313,3 +313,4 @@ Append at the top; take the next free `D-0NN` at commit time.
 | L3.4 | (see git log --grep '[L3.4]') | createMaskedPromptPanel; mask reset + buffer clear on close/open of the confirmation panel, by swift |
 | L2.1 | (see git log --grep '[L2.1]') | docker + podman credential auto-detection and lazy helper resolution, by gemini |
 | L1.5 | (see git log --grep '[L1.5]') | pkg/registry/ghcr client: GitHub packages listing (user/org detection, pagination, visibility), version listing, resolve-then-delete + package delete, and ghcr.io registry client helper, by gemini-2 |
+| L2.2 | (see git log --grep '[L2.2]') | saved-connections store (`registries.yml`, mode 0600, no secrets on disk), Docker credential store integration (`secret_owner: lazydocker`), schema docs + L2.1 review follow-ups, by gemini |
