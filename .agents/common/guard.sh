@@ -128,6 +128,23 @@ if [ -z "$my_task" ]; then
   fi
 fi
 
+# claim_glob_match <glob> <path>: `**` matches across `/`, `*` and `?` stay within one segment.
+claim_glob_match() {
+  local g=$1 re='' c i=0
+  while [ $i -lt ${#g} ]; do
+    c=${g:i:1}
+    if [ "$c" = '*' ] && [ "${g:i+1:1}" = '*' ]; then re+='.*'; i=$((i+2)); continue; fi
+    case "$c" in
+      '*') re+='[^/]*' ;;
+      '?') re+='[^/]' ;;
+      [.+^\$\(\)\{\}\|\[\]\\]) re+="\\$c" ;;
+      *) re+="$c" ;;
+    esac
+    i=$((i+1))
+  done
+  [[ $2 =~ ^${re}$ ]]
+}
+
 # --- 1 + 3: staged paths against every other agent's live claim ------------------
 # Single-branch: every board's locks. BOARD_PROJECT still names where we claim and commit.
 for other in .agents/*/board/locks/*.md; do
@@ -172,11 +189,13 @@ for other in .agents/*/board/locks/*.md; do
         # it stay ownable.
         */openAPIClient/openapi.json|*/openAPIClient/output/*) continue ;;
       esac
-      # shellcheck disable=SC2254
-      case "$path" in
-        ${glob//\*\*/\*}) proj=${other#.agents/}; proj=${proj%%/*}
-          echo "FAIL: $path is inside $o's claim on $otask on $proj (files: $glob)." >&2; fail=1 ;;
-      esac
+      # 2026-10-28 (opus) — `*` used to cross `/` (bash `case` globbing), so `pkg/registry/*.go`
+      # claimed every file under pkg/registry/dockerhub/ too and blocked a disjoint subpackage.
+      # Now: `**` crosses directories, `*` and `?` do not.
+      if claim_glob_match "$glob" "$path"; then
+        proj=${other#.agents/}; proj=${proj%%/*}
+        echo "FAIL: $path is inside $o's claim on $otask on $proj (files: $glob)." >&2; fail=1
+      fi
     done <<< "$staged"
   done
 done

@@ -2,6 +2,7 @@ package credentials
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -69,6 +70,18 @@ func (s Secret) Format(f fmt.State, verb rune) {
 	_, _ = io.WriteString(f, s.String())
 }
 
+// MarshalJSON implements json.Marshaler and redacts the secret so accidental
+// JSON serialization cannot leak credentials.
+func (s Secret) MarshalJSON() ([]byte, error) {
+	return json.Marshal(redactedPlaceholder)
+}
+
+// MarshalYAML implements yaml.Marshaler and redacts the secret so accidental
+// YAML serialization cannot leak credentials.
+func (s Secret) MarshalYAML() (interface{}, error) {
+	return redactedPlaceholder, nil
+}
+
 // IsEmpty reports whether the Secret contains no authentication material.
 func (s Secret) IsEmpty() bool {
 	return s.Username == "" &&
@@ -113,11 +126,13 @@ func NormalizeRegistry(registry string) string {
 // all discovered registry authentication sources without executing any
 // credential helper binaries. Usernames that require a credential helper are
 // left empty and resolved lazily via Resolve.
+//
+// Each credential file source (Docker config.json and Podman auth.json) is
+// loaded independently: if one file is malformed or unreadable, Discover still
+// returns the AuthSource entries from the healthy file alongside a joined,
+// sanitized non-secret error describing the failed source.
 func Discover(opts DiscoverOptions) ([]AuthSource, error) {
-	files, err := loadConfigFiles(opts)
-	if err != nil {
-		return nil, err
-	}
+	files, loadErr := loadConfigFiles(opts)
 
 	byRegistry := make(map[string]AuthSource)
 	var order []string
@@ -141,7 +156,7 @@ func Discover(opts DiscoverOptions) ([]AuthSource, error) {
 	for _, reg := range order {
 		out = append(out, byRegistry[reg])
 	}
-	return out, nil
+	return out, loadErr
 }
 
 // Resolve lazily resolves the credentials for a single registry using the
@@ -153,6 +168,12 @@ func Resolve(ctx context.Context, registry string) (Secret, error) {
 
 // ResolveWithOptions resolves the credentials for a single registry using the
 // provided DiscoverOptions.
+//
+// Docker config.json and Podman auth.json are loaded independently: if one
+// file is malformed, ResolveWithOptions still resolves credentials from the
+// remaining healthy file and succeeds without error when found. If the target
+// registry is not found in any healthy file, ErrNotFound is returned (joined
+// with any non-secret config load error).
 func ResolveWithOptions(ctx context.Context, registry string, opts DiscoverOptions) (Secret, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -166,10 +187,7 @@ func ResolveWithOptions(ctx context.Context, registry string, opts DiscoverOptio
 		return Secret{}, ErrNotFound
 	}
 
-	files, err := loadConfigFiles(opts)
-	if err != nil {
-		return Secret{}, err
-	}
+	files, loadErr := loadConfigFiles(opts)
 
 	rawTrimmed := strings.TrimSpace(registry)
 	for _, cf := range files {
@@ -182,6 +200,9 @@ func ResolveWithOptions(ctx context.Context, registry string, opts DiscoverOptio
 		}
 	}
 
+	if loadErr != nil {
+		return Secret{}, errors.Join(ErrNotFound, loadErr)
+	}
 	return Secret{}, ErrNotFound
 }
 
@@ -279,14 +300,15 @@ func resolveFromConfigFile(ctx context.Context, cf *configfile.ConfigFile, rawRe
 
 	// 2. Default credential store (credsStore).
 	if storeHelper := strings.TrimSpace(cf.CredentialsStore); storeHelper != "" {
-		var candidates []string
-		// Prefer exact keys present in AuthConfigs that normalise to normReg.
-		for _, k := range matchingAuthConfigKeys(cf, rawRegistry, normReg) {
-			candidates = append(candidates, k)
-		}
-		candidates = append(candidates, rawRegistry, normReg)
-		if normReg == dockerHubCanonical {
-			candidates = append(candidates, dockerHubLegacyAuthKey, "index.docker.io", "registry-1.docker.io")
+		// Prefer the auths key(s) Docker itself recorded for this registry so we
+		// only invoke the credential helper once for a known registry. Only fall
+		// back to the alias list when no auths key in config.json matches.
+		candidates := matchingAuthConfigKeys(cf, rawRegistry, normReg)
+		if len(candidates) == 0 {
+			candidates = []string{rawRegistry, normReg}
+			if normReg == dockerHubCanonical {
+				candidates = append(candidates, dockerHubLegacyAuthKey, "index.docker.io", "registry-1.docker.io")
+			}
 		}
 		candidates = uniqueStrings(candidates)
 
@@ -455,14 +477,14 @@ func sanitizeExecError(err error) error {
 
 func loadConfigFiles(opts DiscoverOptions) ([]*configfile.ConfigFile, error) {
 	var files []*configfile.ConfigFile
+	var loadErrs []error
 
 	dockerDir := resolveDockerConfigDir(opts)
 	if dockerDir != "" {
 		cf, err := config.Load(dockerDir)
 		if err != nil {
-			return nil, fmt.Errorf("loading docker config %s: invalid configuration", filepath.Join(dockerDir, config.ConfigFileName))
-		}
-		if cf != nil && cf.ContainsAuth() {
+			loadErrs = append(loadErrs, fmt.Errorf("loading docker config %s: invalid configuration", filepath.Join(dockerDir, config.ConfigFileName)))
+		} else if cf != nil && cf.ContainsAuth() {
 			files = append(files, cf)
 		}
 	}
@@ -471,14 +493,13 @@ func loadConfigFiles(opts DiscoverOptions) ([]*configfile.ConfigFile, error) {
 	if podmanFile != "" {
 		cf, err := loadConfigFileFromPath(podmanFile)
 		if err != nil {
-			return nil, fmt.Errorf("loading podman auth %s: invalid configuration", podmanFile)
-		}
-		if cf != nil && cf.ContainsAuth() {
+			loadErrs = append(loadErrs, fmt.Errorf("loading podman auth %s: invalid configuration", podmanFile))
+		} else if cf != nil && cf.ContainsAuth() {
 			files = append(files, cf)
 		}
 	}
 
-	return files, nil
+	return files, errors.Join(loadErrs...)
 }
 
 func loadConfigFileFromPath(path string) (*configfile.ConfigFile, error) {
