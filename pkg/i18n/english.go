@@ -178,6 +178,41 @@ type TranslationSet struct {
 	CannotEditAutoDetectedRegistry    string
 	RegistryExternalCredentialTitle   string
 	RegistryExternalCredentialMessage string
+
+	// L5.1 — Tag details renderers
+	TagSummaryTag                string
+	TagSummaryDigest             string
+	TagSummaryMediaType          string
+	TagSummaryIndex              string
+	TagSummaryPlatforms          string
+	TagSummarySelectedPlatform   string
+	TagSummaryTotalSize          string
+	TagSummaryLayerCount         string
+	TagSummaryCreated            string
+	TagSummaryNoPlatformSelected string
+	TagSelectPlatformPrompt      string
+	TagSelectPlatform            string
+	TagLayersHeaderIndex         string
+	TagLayersHeaderMediaType     string
+	TagLayersHeaderSize          string
+	TagLayersHeaderDigest        string
+	TagNoLayers                  string
+	TagHistoryHeaderCreated      string
+	TagHistoryHeaderCommand      string
+	TagHistoryHeaderEmpty        string
+	TagHistoryHeaderComment      string
+	TagHistoryEmptyMarker        string
+	TagNoHistory                 string
+	TagConfigUser                string
+	TagConfigWorkingDir          string
+	TagConfigEntrypoint          string
+	TagConfigCmd                 string
+	TagConfigEnv                 string
+	TagNoConfig                  string
+	TagNoLabels                  string
+	TagRootFSType                string
+	TagRootFSDiffIDs             string
+	TagNoRootFS                  string
 }
 
 func englishSet() TranslationSet {
@@ -363,5 +398,46 @@ func englishSet() TranslationSet {
 		CannotEditAutoDetectedRegistry:    "Auto-detected registry logins come from your Docker/Podman config and cannot be edited here.",
 		RegistryExternalCredentialTitle:   "Existing Login Detected",
 		RegistryExternalCredentialMessage: "An existing Docker login was found for this registry and will be used as-is.",
+
+		// L5.1 — Tag details renderers
+		TagSummaryTag:                "Tag:",
+		TagSummaryDigest:             "Digest:",
+		TagSummaryMediaType:          "Media type:",
+		TagSummaryIndex:              "Index:",
+		TagSummaryPlatforms:          "Platforms:",
+		TagSummarySelectedPlatform:   "Selected platform:",
+		TagSummaryTotalSize:          "Total size:",
+		TagSummaryLayerCount:         "Layers:",
+		TagSummaryCreated:            "Created:",
+		TagSummaryNoPlatformSelected: "(none - select a platform)",
+		TagSelectPlatformPrompt:      "Select a platform to view details.",
+		TagSelectPlatform:            "Select a platform to view details.",
+		TagLayersHeaderIndex:         "#",
+		TagLayersHeaderMediaType:     "MEDIA TYPE",
+		TagLayersHeaderSize:          "SIZE",
+		TagLayersHeaderDigest:        "DIGEST",
+		TagNoLayers:                  "No layers available",
+		TagHistoryHeaderCreated:      "CREATED",
+		TagHistoryHeaderCommand:      "COMMAND",
+		TagHistoryHeaderEmpty:        "EMPTY",
+		TagHistoryHeaderComment:      "COMMENT",
+		TagHistoryEmptyMarker:        "<empty>",
+		TagNoHistory:                 "No history available",
+		TagConfigUser:                "User:",
+		TagConfigWorkingDir:          "Working dir:",
+		TagConfigEntrypoint:          "Entrypoint:",
+		TagConfigCmd:                 "Cmd:",
+		TagConfigEnv:                 "Env:",
+		TagNoConfig:                  "No configuration available",
+		TagNoLabels:                  "No labels",
+		TagRootFSType:                "Type:",
+		TagRootFSDiffIDs:             "Diff IDs:",
+		TagNoRootFS:                  "No RootFS information available",
 	}
+}
+
+// EnglishSet returns a copy of the default English translation set.
+func EnglishSet() *TranslationSet {
+	s := englishSet()
+	return &s
 }

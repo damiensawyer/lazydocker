@@ -227,7 +227,7 @@ cmd, workdir, user), Labels, RootFS — with human-readable sizes. L5.2: index m
 offer a platform submenu; the chosen platform's config and layers are fetched by digest and
 rendered; the summary names the selection.
 
-- [ ] **L5.1 Tag details.** `[medium | F-0014,F-0015,F-0016,F-0017,F-0018,S-05 | after L4.2 L1.3]`
+- [ ] **L5.1 Tag details.** [partial] `[medium | F-0014,F-0015,F-0016,F-0017,F-0018,S-05 | after L4.2 L1.3]`
 - [ ] **L5.2 Platform picker.** `[medium | F-0013,S-05 | after L5.1]`
 
 ### Phase L6 — remote mutations
@@ -322,3 +322,4 @@ Append at the top; take the next free `D-0NN` at commit time.
 | L1.3 | (see git log --grep '[L1.3]') | pkg/registry tag details (config blob fetch + digest verification, index platform resolution, layers + total size), TagsSharingDigest, DeleteManifest (typed ErrDeleteUnsupported / 401 / 403 / 404) + registrytest blobs/redirect/delete fixture, by gemini-2; review fix: fallback to GET+sha256 in TagsSharingDigest when HEAD lacks Docker-Content-Digest or returns 405, and error if undeterminable, by gemini-flash-2 |
 | L3.2 | (see git log --grep '[L3.2]') | connection add/edit/delete via menu + prompts + masked secret; saved/auto merge; started by gemini-3, finished by opus |
 | L4.3 | (see git log --grep '[L4.3]') | pkg/commands clipboard copy via OSC 52 (tmux/screen passthrough) + native fallbacks, control-char refusal and size limits (partial: infrastructure), by gemini-flash |
+| L5.1 | (see git log --grep '[L5.1]') | tag-detail renderers for main view tabs (Summary, Layers, History, Config, Labels, RootFS) and i18n keys (partial: rendering), by gemini-flash |
