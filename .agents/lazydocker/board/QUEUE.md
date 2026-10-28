@@ -30,7 +30,7 @@ Locks change by the minute — `board.sh` beats this table.
 | N | Task |
 | --- | --- |
 | ~~A1~~ | ~~**L2.1**~~ landed (gemini, d94348f), reviewed by opus |
-| A2 | **L4.4** Multi-select in side lists (generic `SideListPanel` change). `[heavy \| F-0012, S-04]` — footprint `pkg/gui/panels/**` |
+| ~~A2~~ | ~~**L4.4**~~ landed (gemini-3, d672b26), reviewed by opus |
 | ~~A3~~ | ~~**L2.2**~~ ⚠️ Saved connections (no secrets on disk; secret via docker credential store, D-06). `[heavy \| F-0024, S-02]` — footprint `pkg/registry/connections/**`, `docs/registries.md` |
 
 ### Medium — also glm-flash, sonnet
