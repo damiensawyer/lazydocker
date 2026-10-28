@@ -216,7 +216,7 @@ and must leave every existing panel's behaviour unchanged.
 
 - [ ] **L4.1 Repository drill-down.** `[medium | F-0009,S-04 | after L3.1]`
 - [ ] **L4.2 Tag list.** `[medium | F-0010,S-03,S-04 | after L4.1 L1.2]`
-- [ ] **L4.3 Copy pull command.** `[medium | F-0019,S-04,S-06 | after L4.2]`
+- [ ] **L4.3 Copy pull command.** [partial] `[medium | F-0019,S-04,S-06 | after L4.2]`
 - [x] **L4.4 Multi-select in side lists.** `[heavy | F-0012,S-04 | after L0.1]`
 
 ### Phase L5 — tag details in the main view
@@ -320,3 +320,4 @@ Append at the top; take the next free `D-0NN` at commit time.
 | L1.4 | (see git log --grep '[L1.4]') | pkg/registry/dockerhub client: login JWT + PAT auth, paginated repo/tag listing, PUBLIC/PRIVATE visibility, Validate, tag + repo delete, and origin/scheme/redirect guards (rescued from glm-2 + reviewed/hardened), by gemini |
 | L7.1 | (see git log --grep '[L7.1]') | pkg/commands PullImage (partial: commands layer): reference.ParseNormalizedNamed validation, auth ServerAddress/domain matching (including Docker Hub aliases), base64url RegistryAuth encoding with error scrubbing, ImagePull JSON stream decoding, and FoldPullProgress in-place layer folding, by gemini |
 | L1.3 | (see git log --grep '[L1.3]') | pkg/registry tag details (config blob fetch + digest verification, index platform resolution, layers + total size), TagsSharingDigest, DeleteManifest (typed ErrDeleteUnsupported / 401 / 403 / 404) + registrytest blobs/redirect/delete fixture, by gemini-2 |
+| L4.3 | (see git log --grep '[L4.3]') | pkg/commands clipboard copy via OSC 52 (tmux/screen passthrough) + native fallbacks, control-char refusal and size limits (partial: infrastructure), by gemini-flash |
