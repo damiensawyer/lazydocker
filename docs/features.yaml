@@ -82,8 +82,9 @@ features:
     status: planned
     actors: [user]
     today: >
-      Registries from ~/.docker/config.json and
-      ~/.config/containers/auth.json appear automatically, including
+      Registries from ~/.docker/config.json and Podman's auth.json
+      ($REGISTRY_AUTH_FILE, $XDG_RUNTIME_DIR/containers, ~/.config/containers)
+      appear automatically, including
       credentials held by credential helpers (docker-credential-secretservice
       et al). They are read-only — never editable, never re-saved.
     value: >
@@ -305,8 +306,9 @@ features:
     actors: [user]
     today: >
       Registry connections saved by F-0002 live in their own file
-      (~/.config/lazydocker/registries.yml, mode 0600), with a documented
-      schema; passwords are written only on explicit save.
+      (registries.yml in lazydocker's config dir, mode 0600, no secrets),
+      with a documented schema; the secret goes to the docker credential
+      store exactly as `docker login` would, only on explicit save.
     value: >
       Persistence for connections without touching lazydocker's main config
       contract.

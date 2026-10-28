@@ -14,6 +14,8 @@ facts live. This document is the reasoning.
 | `glm` | GLM 5.3 (Z.ai, via pi) | heavy | Multi-file phases and cross-cutting change. Must ship tests. |
 | `glm-flash` | GLM 5.3 Flash (Z.ai, via pi) | medium | Well-specified single tasks with in-tree precedent to copy. Must ship tests. |
 | `sonnet` | Claude Sonnet 5 (Anthropic, via Claude Code) | medium | Well-specified single tasks with an in-tree pattern to copy, and reviews of `light`/`medium` tasks. Must ship tests. |
+| `gemini` | Gemini 4 Argon (Google, via agy) | heavy (provisional) | Same as `glm`. Unproven on this board — first commits get an `opus` review before anything builds on them. |
+| `swift` | Swift 1.5 (Qwen3.8 27B fine-tune, via pi / llama.cpp ROCm, local) | light | Same as `qwen`. Runs on the local GPU — one instance only. |
 | `qwen` | Qwen3 27B (local, via pi / llama.cpp) | light | Mechanical, template-following, one or two files, verified by one command. |
 
 Tier is set by what going wrong costs, not by model size. `heavy` is design, cross-cutting
