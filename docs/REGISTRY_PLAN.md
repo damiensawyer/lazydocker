@@ -149,7 +149,7 @@ same blast-radius reporting as L1.3).
 - [ ] **L1.2 Catalog, tags, manifests.** `[medium | F-0008,F-0013,S-01 | after L1.1]`
 - [ ] **L1.3 Config blob and delete.** `[medium | F-0012,F-0015,F-0016,F-0017,F-0018,S-01 | after L1.2]`
 - [ ] **L1.4 Docker Hub client.** `[medium | F-0007,F-0012,S-01 | after L1.1]`
-- [ ] **L1.5 ghcr client.** `[medium | F-0006,F-0012,S-01 | after L1.1]`
+- [x] **L1.5 ghcr client.** `[medium | F-0006,F-0012,S-01 | after L1.1]`
 
 ### Phase L2 — credentials & saved connections
 
@@ -312,3 +312,4 @@ Append at the top; take the next free `D-0NN` at commit time.
 | L1.1 | (see git log --grep '[L1.1]') | pkg/registry core: transport, ping, basic+bearer auth, token cache, certs.d CAs, http fallback, both credential-refusal rules + registrytest fixture, by glm |
 | L3.4 | (see git log --grep '[L3.4]') | createMaskedPromptPanel; mask reset + buffer clear on close/open of the confirmation panel, by swift |
 | L2.1 | (see git log --grep '[L2.1]') | docker + podman credential auto-detection and lazy helper resolution, by gemini |
+| L1.5 | (see git log --grep '[L1.5]') | pkg/registry/ghcr client: GitHub packages listing (user/org detection, pagination, visibility), version listing, resolve-then-delete + package delete, and ghcr.io registry client helper, by gemini-2 |
