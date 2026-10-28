@@ -15,6 +15,7 @@ facts live. This document is the reasoning.
 | `glm-flash` | GLM 5.3 Flash (Z.ai, via pi) | medium | Well-specified single tasks with in-tree precedent to copy. Must ship tests. |
 | `sonnet` | Claude Sonnet 5 (Anthropic, via Claude Code) | medium | Well-specified single tasks with an in-tree pattern to copy, and reviews of `light`/`medium` tasks. Must ship tests. |
 | `gemini` | Gemini 4 Argon (Google, via agy) | heavy (provisional) | Same as `glm`. Unproven on this board — first commits get an `opus` review before anything builds on them. |
+| `gemini-flash` | Gemini 3.8 Flash (Google, via agy) | medium | Added 2026-10-28 when Gemini 4 Argon's agy quota ran out (resets in ~7 days). Well-specified single tasks; must ship tests. |
 | `swift` | Swift 1.5 (Qwen3.8 27B fine-tune, via pi / llama.cpp ROCm, local) | light | Same as `qwen`. Runs on the local GPU — one instance only. |
 | `qwen` | Qwen3 27B (local, via pi / llama.cpp) | light | Mechanical, template-following, one or two files, verified by one command. |
 
