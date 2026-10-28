@@ -584,6 +584,65 @@ func TestServerManifest(t *testing.T) {
 			t.Errorf("error body = %s, want NAME_UNKNOWN", body)
 		}
 	})
+
+	t.Run("omit digest on head mode", func(t *testing.T) {
+		s.SetOmitDigestOnHead(true)
+		defer s.SetOmitDigestOnHead(false)
+
+		// HEAD response omits Docker-Content-Digest header.
+		req, err := http.NewRequest(http.MethodHead, s.URL()+"/v2/alpha/manifests/1.0", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("HEAD status = %d, want 200", resp.StatusCode)
+		}
+		if dcd := resp.Header.Get("Docker-Content-Digest"); dcd != "" {
+			t.Errorf("HEAD Docker-Content-Digest = %q, want empty", dcd)
+		}
+
+		// GET response still includes Docker-Content-Digest header.
+		status, header, _ := getBody(t, s.URL()+"/v2/alpha/manifests/1.0")
+		if status != http.StatusOK {
+			t.Fatalf("GET status = %d, want 200", status)
+		}
+		if dcd := header.Get("Docker-Content-Digest"); dcd != singleDgst {
+			t.Errorf("GET Docker-Content-Digest = %q, want %q", dcd, singleDgst)
+		}
+	})
+
+	t.Run("manifest head 405 mode", func(t *testing.T) {
+		s.SetManifestHead405(true)
+		defer s.SetManifestHead405(false)
+
+		// HEAD response is 405 Method Not Allowed.
+		req, err := http.NewRequest(http.MethodHead, s.URL()+"/v2/alpha/manifests/1.0", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusMethodNotAllowed {
+			t.Fatalf("HEAD status = %d, want 405", resp.StatusCode)
+		}
+
+		// GET response is still 200 OK.
+		status, _, body := getBody(t, s.URL()+"/v2/alpha/manifests/1.0")
+		if status != http.StatusOK {
+			t.Fatalf("GET status = %d, want 200", status)
+		}
+		if string(body) != string(single.Body) {
+			t.Error("GET body does not match single body")
+		}
+	})
 }
 
 // TestServerBearerScopeEnforcement pins the fixture's scope model: an

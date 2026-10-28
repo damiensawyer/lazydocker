@@ -216,7 +216,7 @@ and must leave every existing panel's behaviour unchanged.
 
 - [x] **L4.1 Repository drill-down.** `[medium | F-0009,S-04 | after L3.1]`
 - [ ] **L4.2 Tag list.** `[medium | F-0010,S-03,S-04 | after L4.1 L1.2]`
-- [ ] **L4.3 Copy pull command.** `[medium | F-0019,S-04,S-06 | after L4.2]`
+- [ ] **L4.3 Copy pull command.** [partial] `[medium | F-0019,S-04,S-06 | after L4.2]`
 - [x] **L4.4 Multi-select in side lists.** `[heavy | F-0012,S-04 | after L0.1]`
 
 ### Phase L5 — tag details in the main view
@@ -227,7 +227,7 @@ cmd, workdir, user), Labels, RootFS — with human-readable sizes. L5.2: index m
 offer a platform submenu; the chosen platform's config and layers are fetched by digest and
 rendered; the summary names the selection.
 
-- [ ] **L5.1 Tag details.** `[medium | F-0014,F-0015,F-0016,F-0017,F-0018,S-05 | after L4.2 L1.3]`
+- [ ] **L5.1 Tag details.** [partial] `[medium | F-0014,F-0015,F-0016,F-0017,F-0018,S-05 | after L4.2 L1.3]`
 - [ ] **L5.2 Platform picker.** `[medium | F-0013,S-05 | after L5.1]`
 
 ### Phase L6 — remote mutations
@@ -319,6 +319,8 @@ Append at the top; take the next free `D-0NN` at commit time.
 | L3.1 | (see git log --grep '[L3.1]') | Registries side panel (`SideListPanel[*registryItem]`), lazy first-focus discovery + async per-registry ping with generation counter, `registries.enabled` config, summary main tab, and i18n keys (rescued from glm-3), by gemini-3 |
 | L1.4 | (see git log --grep '[L1.4]') | pkg/registry/dockerhub client: login JWT + PAT auth, paginated repo/tag listing, PUBLIC/PRIVATE visibility, Validate, tag + repo delete, and origin/scheme/redirect guards (rescued from glm-2 + reviewed/hardened), by gemini |
 | L7.1 | (see git log --grep '[L7.1]') | pkg/commands PullImage (partial: commands layer): reference.ParseNormalizedNamed validation, auth ServerAddress/domain matching (including Docker Hub aliases), base64url RegistryAuth encoding with error scrubbing, ImagePull JSON stream decoding, and FoldPullProgress in-place layer folding, by gemini |
-| L1.3 | (see git log --grep '[L1.3]') | pkg/registry tag details (config blob fetch + digest verification, index platform resolution, layers + total size), TagsSharingDigest, DeleteManifest (typed ErrDeleteUnsupported / 401 / 403 / 404) + registrytest blobs/redirect/delete fixture, by gemini-2 |
+| L1.3 | (see git log --grep '[L1.3]') | pkg/registry tag details (config blob fetch + digest verification, index platform resolution, layers + total size), TagsSharingDigest, DeleteManifest (typed ErrDeleteUnsupported / 401 / 403 / 404) + registrytest blobs/redirect/delete fixture, by gemini-2; review fix: fallback to GET+sha256 in TagsSharingDigest when HEAD lacks Docker-Content-Digest or returns 405, and error if undeterminable, by gemini-flash-2 |
 | L3.2 | (see git log --grep '[L3.2]') | connection add/edit/delete via menu + prompts + masked secret; saved/auto merge; started by gemini-3, finished by opus |
 | L4.1 | (see git log --grep '[L4.1]') | repository drill-down (Enter/Esc navigation, breadcrumb title, async load & generation guard, per-kind client source, inert connection CRUD), by gemini-flash-3 |
+| L4.3 | (see git log --grep '[L4.3]') | pkg/commands clipboard copy via OSC 52 (tmux/screen passthrough) + native fallbacks, control-char refusal and size limits (partial: infrastructure), by gemini-flash |
+| L5.1 | (see git log --grep '[L5.1]') | tag-detail renderers for main view tabs (Summary, Layers, History, Config, Labels, RootFS) and i18n keys (partial: rendering), by gemini-flash |
